@@ -1,3 +1,4 @@
+use std::hash::Hasher;
 use std::path::PathBuf;
 #[cfg(feature = "load")]
 use std::{
@@ -9,6 +10,7 @@ use std::{
 
 use bitflags::bitflags;
 use node_types::VariableInfo;
+use rustc_hash::FxHasher;
 #[cfg(feature = "load")]
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -64,6 +66,10 @@ struct JSONOutput {
 
 struct GeneratedParser {
     c_code: String,
+    /// Parse states after conflict resolution, i.e. the states in the table.
+    states: usize,
+    /// Main lexer states, i.e. the states the runtime lexer actually enters.
+    lex_states: usize,
     #[cfg(feature = "load")]
     node_types_json: String,
 }
@@ -391,6 +397,89 @@ impl std::fmt::Display for Diagnostic {
     }
 }
 
+/// A digest of the parser a grammar actually builds.
+///
+/// This is deliberately not a dump of the input: a grammar is only meaningful
+/// once every stage has run on it — unused rules dropped, tokens extracted,
+/// inline rules expanded, repeat rules rewritten, conflicts resolved against
+/// precedence, and the lexer tables built. Those stages rewrite the rule tree
+/// and *delete* rules, so the input document is not what gets compiled; the
+/// rendered parser is the only artifact that holds every decision the build
+/// made. Two inputs that stamp the same are, to this generator, the same
+/// parser: same states, same actions, same token metadata, same node types.
+///
+/// That is what makes it usable as the final word for anything that rewrites a
+/// grammar (a formatter, a translator, a front end like `tsg`): a formatter may
+/// move text around as much as it likes, and the stamp will not budge; the
+/// moment it drops a parenthesis that grouped a choice, the build sees a
+/// different rule tree and the stamp moves. Notational edits are not errors,
+/// structural ones are, and the generator decides which is which — not a
+/// hand-written comparison that has to re-learn the grammar format every time.
+///
+/// The digest is over the rendered C source, so it also depends on the ABI
+/// version and optimization level; a comparison means nothing unless both
+/// sides ask for the same ones.
+#[derive(Debug, Clone, Serialize)]
+pub struct GrammarStamp {
+    /// FxHash of the rendered parser, as hex. Same hex, same parser.
+    pub digest: String,
+    /// FxHash of `node-types.json`, as hex.
+    ///
+    /// The parser and the node types are written from the same build but are
+    /// not the same document: a supertype's `children` list and the node names
+    /// that queries and editors see live only here, so hashing the parser alone
+    /// would let a rewrite move them unnoticed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_types: Option<String>,
+    /// Size of the rendered parser, so a digest is not the only clue.
+    pub bytes: usize,
+    /// Parse states in the built table.
+    pub states: usize,
+    /// Main lexer states in the built table.
+    pub lex_states: usize,
+}
+
+/// Build a grammar and stamp the parser it makes, without writing any file.
+///
+/// Runs the whole generation pipeline (`parse_grammar` → `generate_node_types`
+/// → `build_tables` → render), so it fails exactly where generation fails,
+/// including conflicts that precedence does not resolve.
+pub fn stamp_parser_for_grammar(
+    grammar_json: &str,
+    abi_version: usize,
+    optimizations: OptLevel,
+    max_states: Option<usize>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> GenerateResult<GrammarStamp> {
+    let input_grammar = parse_grammar(grammar_json, diagnostics)?;
+    let generated = generate_parser_for_grammar_with_opts(
+        input_grammar,
+        abi_version,
+        None,
+        None,
+        None,
+        optimizations,
+        max_states,
+        diagnostics,
+    )?;
+    let hash = |bytes: &[u8]| {
+        let mut hasher = FxHasher::default();
+        hasher.write(bytes);
+        format!("{:016x}", hasher.finish())
+    };
+    #[cfg(feature = "load")]
+    let node_types = Some(hash(generated.node_types_json.as_bytes()));
+    #[cfg(not(feature = "load"))]
+    let node_types = None;
+    Ok(GrammarStamp {
+        digest: hash(generated.c_code.as_bytes()),
+        node_types,
+        bytes: generated.c_code.len(),
+        states: generated.states,
+        lex_states: generated.lex_states,
+    })
+}
+
 #[cfg(feature = "load")]
 #[expect(
     clippy::too_many_arguments,
@@ -482,6 +571,7 @@ where
     let GeneratedParser {
         c_code,
         node_types_json,
+        ..
     } = generate_parser_for_grammar_with_opts(
         input_grammar,
         abi_version,
@@ -606,6 +696,8 @@ fn generate_parser_for_grammar_with_opts(
         max_states,
         diagnostics,
     )?;
+    let states = tables.parse_table.states.len();
+    let lex_states = tables.main_lex_table.states.len();
     let c_code = render_c_code(
         grammar_name,
         tables,
@@ -619,6 +711,8 @@ fn generate_parser_for_grammar_with_opts(
     )?;
     Ok(GeneratedParser {
         c_code,
+        states,
+        lex_states,
         #[cfg(feature = "load")]
         node_types_json,
     })
@@ -818,7 +912,45 @@ pub fn write_file(path: &Path, body: impl AsRef<[u8]>) -> GenerateResult<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{LANGUAGE_VERSION, PARSER_HEADER};
+    use super::{LANGUAGE_VERSION, OptLevel, PARSER_HEADER, stamp_parser_for_grammar};
+
+    fn stamp(grammar_json: &str) -> super::GrammarStamp {
+        let mut diagnostics = Vec::new();
+        stamp_parser_for_grammar(
+            grammar_json,
+            LANGUAGE_VERSION,
+            OptLevel::default(),
+            None,
+            &mut diagnostics,
+        )
+        .expect("the grammar should build")
+    }
+
+    /// The stamp is the *build's* answer, not the document's: rule order,
+    /// alternative order and rules that nothing reaches do not survive to the
+    /// parser, so they must not move the digest either.
+    #[test]
+    fn a_stamp_ignores_what_the_build_discards() {
+        let base = r#"{"name":"s","rules":{
+            "a":{"type":"CHOICE","members":[{"type":"STRING","value":"x"},{"type":"SYMBOL","name":"b"}]},
+            "b":{"type":"STRING","value":"y"},
+            "c":{"type":"STRING","value":"z"}},"start":"a"}"#;
+        let reordered = r#"{"name":"s","rules":{
+            "c":{"type":"STRING","value":"z"},
+            "b":{"type":"STRING","value":"y"},
+            "a":{"type":"CHOICE","members":[{"type":"SYMBOL","name":"b"},{"type":"STRING","value":"x"}]}},"start":"a"}"#;
+        assert_eq!(stamp(base).digest, stamp(reordered).digest);
+        assert_eq!(stamp(base).states, stamp(reordered).states);
+    }
+
+    /// ... and the one edit that does change the parser must change it.
+    #[test]
+    fn a_stamp_notices_a_dropped_alternative() {
+        let one = r#"{"name":"s","rules":{
+            "a":{"type":"CHOICE","members":[{"type":"STRING","value":"x"},{"type":"STRING","value":"y"}]}}}"#;
+        let two = r#"{"name":"s","rules":{"a":{"type":"STRING","value":"x"}}}"#;
+        assert_ne!(stamp(one).digest, stamp(two).digest);
+    }
     #[test]
     fn test_language_versions_are_in_sync() {
         let api_h = include_str!("../../../lib/include/tree_sitter/api.h");

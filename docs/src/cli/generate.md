@@ -47,6 +47,28 @@ The ABI to use for parser generation. The default is ABI 15, with ABI 14 being a
 
 Only generate `grammar.json` and `node-types.json`
 
+### `--stamp`
+
+Build the grammar and print a digest of what the build produced, then exit without writing any file:
+
+```json
+{
+  "digest": "7ad4882426282053",
+  "node_types": "971ef8e9055b57bc",
+  "bytes": 4656,
+  "states": 4,
+  "lex_states": 4
+}
+```
+
+The digest covers the rendered parser and `node-types.json` from the same build, after unused rules are dropped, tokens
+are extracted, inline rules are expanded, conflicts are resolved against precedence, and the lexer tables are built. Two
+grammars with the same stamp build the same parser, so this is how to check that a rewrite of a grammar (a formatter, a
+translator, a generator) changed nothing that matters: compare stamps instead of `grammar.json` text. Rule order,
+whitespace, and parentheses that do not change the rule tree do not move the stamp; a dropped alternative, a changed
+precedence, or a different alias does. The digest depends on the ABI version and optimization options, so both sides of a
+comparison must pass the same ones.
+
 ### `-o/--output`
 
 The directory to place the generated parser in. The default is `src/` in the current directory.
