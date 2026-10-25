@@ -198,7 +198,25 @@ fn main() -> ExitCode {
             }
         };
         match to_tsg::grammar_to_tsg(&grammar) {
-            Ok(text) => text,
+            Ok(text) => {
+                // `%external name = delimited(…)` is a *scanner*, and a scanner
+                // is C in `src/scanner.c`: `grammar.json` only records the token
+                // name. Say so, or the declaration disappears without a trace.
+                let external = text
+                    .lines()
+                    .filter(|line| line.starts_with("%external "))
+                    .count();
+                if external > 0 {
+                    eprintln!(
+                        "note: {display_name} declares {external} external token{}, but the \
+                         scanner's code is not in a grammar.json; if the source used \
+                         `%external NAME = delimited(open, close)`, the generated \
+                         `src/scanner.c` has to be regenerated from the `.tsg`",
+                        if external == 1 { "" } else { "s" }
+                    );
+                }
+                text
+            }
             Err(message) => {
                 eprintln!("error: {display_name}: {message}");
                 return ExitCode::FAILURE;

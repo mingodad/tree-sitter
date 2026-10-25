@@ -466,6 +466,12 @@ A few things exist only to make the round trip lossless:
   no surface operator can express. Real grammars contain them (`swift` has a
   one-member `CHOICE` in `inheritance_modifier`).
 
+One thing cannot come back, and the reverse direction says so instead of
+pretending: an external token's **scanner** is C, `grammar.json` only records the
+name, so `%external body = delimited('{', '}')` comes back as `%external body;`
+with a note. Regenerate the `.tsg` (and its `src/scanner.c`) from the `.tsg`, not
+from the JSON.
+
 ## 7. Deliberate omissions
 
 * `grammar(baseGrammar, …)` / `inherits` as a *merging* mechanism. `%inherits`
