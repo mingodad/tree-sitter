@@ -10,6 +10,7 @@
 .harness/
 .xmode/
 .probe/
+.corpus/
 
 target/
 bin/
