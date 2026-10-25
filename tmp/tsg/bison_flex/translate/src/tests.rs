@@ -40,7 +40,7 @@ fn translate(source: &str) -> String {
 fn rules(source: &str) -> String {
     let text = translate(source);
     let start = text
-        .find("// The first rule outside `tokens` is the start rule.")
+        .find("// The start rule is written first.")
         .expect("the rules section marker");
     text[start..].to_string()
 }
@@ -149,6 +149,29 @@ fn a_fallback_token_is_offered_after_its_specific_tokens() {
     let x = text.find("  X:").expect("X has a body");
     let y = text.find("  Y:").expect("Y has a body");
     assert!(x < y, "X is the specific token and has to be offered first\n{text}");
+}
+
+#[test]
+fn a_declared_start_symbol_becomes_a_start_directive() {
+    // Bison's `%start` is a declaration, not a position; the `.tsg` says it
+    // rather than relying on which rule the emitter writes first.
+    let text = translate(
+        "%token A\n%start second\n%%\nfirst : A A ;\nsecond : A ;\n%%\n%%\nA A\n%%\n",
+    );
+    assert!(text.contains("%start second;"), "{text}");
+    assert!(
+        text.find("%start second;").unwrap() < text.find("second:").unwrap(),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_start_symbol_bison_did_not_name_is_left_positional() {
+    // No `%start` in the source: the first rule is the symbol, and writing an
+    // explicit directive would claim the file said something it did not.
+    let text = translate("%token A\n%%\nfirst : A A ;\nsecond : A ;\n%%\n%%\nA A\n%%\n");
+    assert!(!text.contains("%start"), "{text}");
+    assert!(text.contains("// Bison named no start symbol"), "{text}");
 }
 
 #[test]

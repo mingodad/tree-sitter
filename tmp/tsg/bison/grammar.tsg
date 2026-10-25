@@ -2,6 +2,7 @@
 // Translated by g2tsg from bison.g (read with bison_flex/grammar.tsg).
 
 %name bison;
+%start input;
 
 // Flex start condition `ACTION_CODE`: one token for the whole region.
 %external ACTION_CODE = delimited('{', '}');
@@ -27,7 +28,8 @@ tokens {
 // `nonassoc` becomes a level with no associativity (see the notes above).
 
 
-// The first rule outside `tokens` is the start rule.
+// Bison named the start symbol with `%start`.
+// The start rule is written first.
 
 input:
     prologue_declarations? SECTION_MARK grammar epilogue_opt?;

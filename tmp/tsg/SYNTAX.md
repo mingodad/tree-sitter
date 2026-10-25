@@ -21,6 +21,7 @@ A file is a sequence of **items**, each terminated by `;`:
 | Item | Form | Emitted as |
 | --- | --- | --- |
 | grammar name | `%name json;` | `"name"` |
+| start rule | `%start source_file;` | `"start"` |
 | parent grammar | `%inherits javascript;` | `"inherits"` |
 | keyword token | `%word identifier;` | `"word"` |
 | extra token | `%extra /\s/;` | entry in `"extras"` |
@@ -41,10 +42,18 @@ Comments are `// line` and `/* block */`. Strings may be written with `'` or
 `"` and understand the usual escapes (`\n`, `\t`, `\\`, `\'`, `\xHH`,
 `\uXXXX`, `\u{...}`, UTF-16 surrogate pairs).
 
-**Rule order is semantic**: the first rule *not* declared in a `tokens` block is
-the start rule, and the order is preserved in `grammar.json`. Inside a `tokens`
-block the file order is token **priority** order: when two tokens match the same
-length, the earlier rule wins.
+**Rule order decides the start rule only when nothing else does**: `%start
+source_file;` names the entry point, and the name travels to `grammar.json` as
+`"start"` (the generator promotes it to `variables[0]`). Without `%start` the
+first rule *not* declared in a `tokens` block is the start rule, which is what
+Bison's `%start` and the DSL's rule order both come down to. Rule order is still
+preserved in `grammar.json`, and inside a `tokens` block it is token **priority**
+order: when two tokens match the same length, the earlier rule wins.
+
+Declaring `%start` is what keeps a `tokens` block free to move: reordering token
+rules for priority can no longer silently change which rule a tree starts at.
+The named rule has to be a rule, not a token — a token cannot start a tree, and
+`tsg` says so with the directive's position.
 
 If no `%extra` is declared, `extras` defaults to `[{"type":"PATTERN","value":"\\s"}]`,
 exactly like `dsl.js`. `%extras none;` is the way to ask for a genuinely empty
@@ -354,7 +363,8 @@ Reported statically, before any table is built:
   a token, a `%word` that names a nonterminal, regex flags that
   cannot do anything (`/x/g`, `/x/u`, `/x/s`, …) or that repeat `i`
 * resolution: undefined rules (with a "did you mean"), undefined names in
-  `%word` / `%inline` / `%supertypes` / `%conflicts`
+  `%word` / `%inline` / `%supertypes` / `%conflicts`, and a `%start` that names
+  no rule or names a token
 
 Conflicts that only appear once tables are built are still reported by
 tree-sitter itself, unchanged.

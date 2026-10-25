@@ -228,6 +228,11 @@ that for free — its lexer only produces tokens the state accepts — so the wh
 translation is the order of the `tokens` block: the specific token has to come
 before the fallback one, or it loses the lexer tie.
 
+`%start` is passed through as the directive rather than re-derived from rule
+order. In all 241 corpus files that declare it, it is also the first rule, so
+nothing parses differently — but the `.tsg` now says what Bison said, and moving
+a `tokens` block for token priority can no longer change the entry point.
+
 That 301 is 6 fewer than before the `antlr-v4.5` run, and on
 purpose: 16 files used to lose their start rule to the dead-production cascade
 and then have the *next* rule promoted to start symbol — a parser for the wrong

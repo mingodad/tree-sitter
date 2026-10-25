@@ -9,9 +9,9 @@
 //! What it normalizes: one directive per line, one alternative per line, no
 //! alignment padding, a fixed blank line between sections, minimal parentheses
 //! (recomputed from the AST), and one quote style per literal.  What it does not
-//! touch: the order of rules (the first rule is the start rule), the order of
-//! alternatives, the order of precedence levels, and every token body byte for
-//! byte.
+//! touch: the order of rules (the first non-token rule is the start rule unless
+//! `%start` says otherwise), the order of alternatives, the order of precedence
+//! levels, and every token body byte for byte.
 //!
 //! Comments live only in the source text.  The leading block is kept verbatim;
 //! interior comments are counted and reported, never silently dropped.
@@ -74,6 +74,9 @@ fn body(ast: &GrammarAst) -> String {
 
     if let Some((name, _)) = &ast.name {
         directives.push(format!("%name {name};"));
+    }
+    if let Some((name, _)) = &ast.start {
+        directives.push(format!("%start {name};"));
     }
     if let Some((name, _)) = &ast.inherits {
         directives.push(format!("%inherits {name};"));

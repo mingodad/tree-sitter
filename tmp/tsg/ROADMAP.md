@@ -131,9 +131,14 @@ and is the first thing to ship.
   an error action (`crates/generate/src/tables.rs:16`), so document that the
   result is an `ERROR` node via recovery, not a rejected parse.
 - Keyword extraction (`%keyword`), if `%fallback` (item 1) is not enough.
-- `%start` front ends: `tsg` emits `"start"`; `--from-json` prints `%start`
-  when the start rule is not first; `g2tsg` passes Bison's `%start` through.
-  (Generator half is patch `0011`.)
+- `%start` front ends — **done** (`tsg` emits `"start"`, `--from-json` prints
+  `%start`, `g2tsg` passes Bison's `%start` through; the generator half is patch
+  `0011`).  Measured before it was written: 241 of 358 corpus `.g` files declare
+  `%start`, and in every one it was also the first rule — so it unblocks nothing
+  by itself.  It is still worth its ~4 hours because it stops rule *order* from
+  being load-bearing and invisible: a `tokens` block can now be moved for token
+  priority without silently changing the entry point, and Bison's declaration
+  survives the translation instead of being re-derived from position.
 
 ## Parked, with the measurement that would revive it
 

@@ -6,6 +6,7 @@
 // without teaching the language description shows up as a failure.
 
 %name directives;
+%start start;
 %inherits base;
 %word KEYWORD;
 %extra /[ \t\r\n]+/;
@@ -31,7 +32,8 @@
 %reserved keywords = 'if', 'else', KEYWORD;
 %reserved empty = ;
 
-// The start rule is the one place emptiness is allowed.
+// The start rule is the one place emptiness is allowed, and `%start` names it
+// explicitly, so the rule no longer has to come first in the file.
 start: super_a | conflict_a | 'if' | 'else' | ();
 
 _body:

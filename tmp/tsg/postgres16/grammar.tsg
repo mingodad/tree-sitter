@@ -27,6 +27,7 @@
 //     them).  `BCONST`/`XCONST` match the literal words, as in the source.
 
 %name postgres;
+%start parse_toplevel;
 
 tokens {
   BCONST: /BCONST/i;
@@ -568,7 +569,8 @@ tokens {
 %conflicts b_expr;
 %conflicts func_table;
 
-// The first rule outside `tokens` is the start rule.
+// Bison named the start symbol with `%start`.
+// The start rule is written first.
 
 parse_toplevel:
     stmtmulti?

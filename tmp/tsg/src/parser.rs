@@ -5,6 +5,7 @@
 //! item       := directive | rule
 //! rule       := IDENT ':' expr ';'
 //! directive  := '%name' IDENT ';'
+//!             | '%start' IDENT ';'
 //!             | '%inherits' IDENT ';'
 //!             | '%word' IDENT ';'
 //!             | '%extra' expr ';'
@@ -128,11 +129,20 @@ pub struct Delimited {
 
 /// Everything in a `.tsg` file: directives plus ordered rule definitions.
 ///
-/// `rules` is a `Vec`, not a map: rule order is semantic — the first rule is
-/// the grammar's start rule.
+/// `rules` is a `Vec`, not a map: rule order is preserved in `grammar.json`
+/// (it is the order of `variables`), and it decides the start rule only when
+/// `%start` says nothing — see [`GrammarAst::start_rule`].
 #[derive(Debug, Default)]
 pub struct GrammarAst {
     pub name: Option<(String, Span)>,
+    /// `%start expr;` — the rule the tree starts at.
+    ///
+    /// Without it the entry point is the first rule that is not declared in a
+    /// `tokens` block, which makes *order* semantic: writing a token block above
+    /// the intended start rule silently changes the grammar's entry point.  With
+    /// it, order is free again and the name travels to `grammar.json` as the
+    /// `"start"` key, where the generator promotes the rule to `variables[0]`.
+    pub start: Option<(String, Span)>,
     pub word: Option<(String, Span)>,
     /// `%inherits javascript;` — the parent grammar's name. tree-sitter's Rust
     /// pipeline ignores this key (the DSL flattens base grammars in JS), but the
@@ -166,6 +176,24 @@ pub struct GrammarAst {
     /// diagnostics (which only know names) can find the definition again. See
     /// [`crate::source::Index`].
     pub rule_names: Vec<(String, Span)>,
+}
+
+impl GrammarAst {
+    /// The rule a tree starts at, by name.
+    ///
+    /// `%start` wins. Without it this is the first rule *not* declared in a
+    /// `tokens` block: a block may sit above the intended entry point, and every
+    /// other pass (lexing, nullability) has to read the same rule as `compile`.
+    pub fn start_rule(&self) -> Option<&str> {
+        if let Some((name, _)) = &self.start {
+            return Some(name.as_str());
+        }
+        let is_token = |name: &str| self.tokens.iter().any(|rule| rule.name == name);
+        self.rules
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .find(|name| !is_token(name))
+    }
 }
 
 pub struct Parser<'a> {
@@ -391,6 +419,14 @@ impl<'a> Parser<'a> {
                     return Err(Error::new(span, "`%name` was already specified"));
                 }
                 grammar.name = Some((value, span));
+            }
+            "start" => {
+                let (value, span) = self.expect_ident("the start rule's name")?;
+                self.expect_semi()?;
+                if grammar.start.is_some() {
+                    return Err(Error::new(span, "`%start` was already specified"));
+                }
+                grammar.start = Some((value, span));
             }
             "inherits" => {
                 let (value, span) = self.expect_ident("the name of the parent grammar")?;
@@ -660,9 +696,9 @@ impl<'a> Parser<'a> {
                 return Err(Error::new(
                     self.cur_span(),
                     format!(
-                        "unknown directive `%{other}` (known: %name, %word, %extra, \
-                         %external, %inline, %supertypes, %conflicts, %precedence, \
-                         %reserved)"
+                        "unknown directive `%{other}` (known: %name, %start, %word, \
+                         %extra, %external, %inline, %supertypes, %conflicts, \
+                         %precedence, %reserved)"
                     ),
                 ))
             }

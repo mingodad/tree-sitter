@@ -2,6 +2,7 @@
 // Translated by g2tsg from bc.g (read with bison_flex/grammar.tsg).
 
 %name bc;
+%start program;
 
 tokens {
   Define: /define/;
@@ -64,7 +65,8 @@ tokens {
 // conflict is declared rather than resolved.
 %conflicts statement;
 
-// The first rule outside `tokens` is the start rule.
+// Bison named the start symbol with `%start`.
+// The start rule is written first.
 
 program:
     program input_item

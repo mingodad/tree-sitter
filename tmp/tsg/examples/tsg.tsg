@@ -30,6 +30,7 @@ _item: directive | tokens_block | rule_definition;
 
 directive:
     name_directive
+  | start_directive
   | inherits_directive
   | word_directive
   | extra_directive
@@ -55,6 +56,9 @@ rule_definition: name= identifier ':' body= _expression ';';
 // --- directives ------------------------------------------------------------
 
 name_directive: '%name' name= identifier ';';
+
+// `%start rule;` names the entry point, so rule order stops deciding it.
+start_directive: '%start' rule= identifier ';';
 
 inherits_directive: '%inherits' parent= identifier ';';
 

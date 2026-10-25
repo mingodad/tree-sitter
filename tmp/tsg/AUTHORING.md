@@ -162,29 +162,37 @@ of `/Volumes/RamDisk/tree-sitter` at `0001`–`0009`; the gates default to it
 (`TS=` overrides).  `postgres16` and `bc` need `--lalr` and therefore cannot run
 on stock 0.28.0.
 
-## 9. Explicit start rule — anchors for the patch
+## 9. Explicit start rule — done
 
-The start rule is positional: `InputGrammar.variables` (`grammars.rs:41`) is in
-JSON order and everything downstream takes `variables.first()` as the start
-(`parse_grammar.rs:151`, the "used" DFS in `normalize`).  So `"start": "name"`
-needs no new field threaded through the pipeline — the rule named must simply
-be **promoted to `variables[0]`** when the JSON is read, and rotated relative
-to nothing else.  Three edits:
+The start rule used to be positional: `InputGrammar.variables`
+(`grammars.rs:41`) is in JSON order and everything downstream took
+`variables.first()` as the start (`parse_grammar.rs:151`, the "used" DFS in
+`normalize`).  `"start": "name"` needed no new field threaded through the
+pipeline: the named rule is **promoted to `variables[0]`** when the JSON is read,
+so nothing downstream changed.
+
+What shipped:
 
 1. `parse_grammar.rs`: `#[serde(default)] start: Option<String>` on
-   `GrammarJSON`; after the rules map becomes `variables`, find the index of
-   `start` and rotate it to the front.  Two errors worth having: `start` names
-   no rule ("no rule called `x`; the rules are …"), and `start` names a token
-   (a token cannot be the start rule).  `deny_unknown_fields` already makes an
-   old generator reject the key instead of ignoring it.
-2. `tsg`: `%start name;` → `"start": "name"`, with the same two checks in
-   `compile.rs` (it already reports "the first non-token rule is the start
-   rule", so the prose can go away); `--from-json` emits `%start` only when the
-   start is not the first rule.
-3. `g2tsg`: pass Bison's `%start` through instead of relying on file order.
+   `GrammarJSON`; after the rules map becomes `variables`, the named rule is
+   rotated to the front.  Two errors: `start` names no rule, and `start` names a
+   token.
+2. `tsg`: `%start name;` → `"start"`.  The AST keeps the author's rule order
+   (the directive is the reason order no longer decides the entry point), and
+   `compile` validates the same two cases at the directive's span.  A grammar
+   without `%start` emits no `"start"` key, so every existing `grammar.json` is
+   byte-identical.  `--from-json` prints `%start` whenever the key is present,
+   which is what makes the round trip order-preserving; `--fmt` prints it too.
+3. `g2tsg`: Bison's `%start` is passed through as the directive, and the
+   comment says which of the two cases produced the file (`%start` declared, or
+   Bison's default of first-rule-wins).  `postgres16/translate.py` emits the same
+   two lines, because that gate compares its output against `g2tsg`'s.
 
-Corpus reality (measured): 241 of 358 `.g` files declare `%start` and in every
-one it is also the first rule, so this unblocks nothing today.  Its value is
-that rule order stops being load-bearing and invisible.  Batch it with the
-generator-only items (`state ids in conflict messages`, `unreachable token`)
-because each generator change costs one rebuild plus one re-export.
+Regenerated artifacts: `postgres16/grammar.tsg`, `bison/grammar.tsg`,
+`bc/grammar.tsg` (each differs only by the `%start` line and the section
+comment).  Their `grammar.json`/`parser.c` are unchanged, because in every one
+the declared start symbol is also the first rule.
+
+Corpus reality (measured before the work): 241 of 358 `.g` files declare
+`%start` and in every one it is also the first rule, so this unblocks nothing
+today.  Its value is that rule order stops being load-bearing and invisible.

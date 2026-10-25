@@ -77,14 +77,13 @@ fn token_shape(expr: &Expr) -> bool {
 /// Read `grammar` and return the token set plus the priority order.
 pub fn analyse(grammar: &GrammarAst) -> Lexing {
     let mut lexing = Lexing::default();
-    // The start rule is the first rule *not* declared in `tokens`: a block may
-    // sit before the start rule, and `compile` moves that rule to the front of
-    // `grammar.json`. Resolve it here too, so `--explain-modes` can read the
-    // source AST without duplicating the reordering.
+    // The start rule is `%start` if the grammar names one, else the first rule
+    // *not* declared in `tokens`: a block may sit before the start rule. Resolve
+    // it the same way `compile` does, so `--explain-modes` reads the source AST
+    // without duplicating the rule.
     let start = grammar
-        .rules
-        .iter()
-        .position(|(name, _)| !grammar.tokens.iter().any(|rule| rule.name == *name))
+        .start_rule()
+        .and_then(|name| grammar.rules.iter().position(|(rule, _)| rule == name))
         .unwrap_or(0);
     for (index, (name, body)) in grammar.rules.iter().enumerate() {
         let declared = grammar.tokens.iter().find(|rule| rule.name == *name);

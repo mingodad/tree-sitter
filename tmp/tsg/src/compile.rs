@@ -64,26 +64,56 @@ pub fn compile_with(src: &str, options: Options) -> Result<Compiled, Vec<Error>>
     }
 
     // A `tokens { … }` block may sit before the start rule. Its rules are still
-    // rules in file order — that is token priority — but the first rule of the
-    // *grammar* has to be a non-token. Move the first rule that is not declared
-    // lexical to the front, keeping every token's relative order unchanged.
+    // rules in file order — that is token priority — but the entry point of the
+    // *grammar* has to be a non-token.
+    //
+    // `%start` names it. Without `%start`, the first rule that is not declared
+    // lexical is moved to the front, keeping every token's relative order
+    // unchanged — that is what makes order semantic today. When `%start` does
+    // name it, rule order is left exactly as written: the name travels to
+    // `grammar.json` as `"start"`, and the generator promotes the rule itself.
     let declared: HashSet<&str> = ast.tokens.iter().map(|rule| rule.name.as_str()).collect();
-    match ast
-        .rules
-        .iter()
-        .position(|(name, _)| !declared.contains(name.as_str()))
-    {
-        Some(0) => {}
-        Some(index) => {
-            let start = ast.rules.remove(index);
-            ast.rules.insert(0, start);
+    match ast.start.clone() {
+        Some((name, span)) => {
+            if declared.contains(name.as_str()) {
+                return Err(vec![Error::new(
+                    span,
+                    format!("`%start` names the token `{name}`; a token cannot start a tree"),
+                )
+                .with_help(format!(
+                    "name the rule a tree starts at (one without a `tokens` block \
+                     declaration), e.g. `%start source_file;`"
+                ))]);
+            }
+            if !ast.rules.iter().any(|(rule, _)| *rule == name) {
+                return Err(vec![Error::new(
+                    span,
+                    format!("`%start` names `{name}`, which is not a rule"),
+                )
+                .with_help(
+                    "`%start` must name a rule defined with `name: …;`; an external \
+                     token is not a tree root"
+                        .to_owned(),
+                )]);
+            }
         }
-        None => {
-            return Err(vec![Error::new(
-                Span::new(src.len(), src.len()),
-                "a grammar needs a start rule outside `tokens`; every rule here is a token",
-            )]);
-        }
+        None => match ast
+            .rules
+            .iter()
+            .position(|(name, _)| !declared.contains(name.as_str()))
+        {
+            Some(0) => {}
+            Some(index) => {
+                let start = ast.rules.remove(index);
+                ast.rules.insert(0, start);
+            }
+            None => {
+                return Err(vec![Error::new(
+                    Span::new(src.len(), src.len()),
+                    "a grammar needs a start rule outside `tokens`; every rule here is a token",
+                )]);
+            }
+        },
     }
 
     // External tokens introduce their own names, which ordinary rules may
@@ -661,13 +691,12 @@ fn lexical_errors<'a>(
 
 fn nullability_errors(src: &str, ast: &GrammarAst) -> Vec<Error> {
     let nullable = crate::nullable::analyse(ast);
-    let start = ast.rules.first().map(|(name, _)| name.as_str());
+    let start = ast.start_rule();
     let mut errors = Vec::new();
     for (name, _body) in &ast.rules {
         if Some(name.as_str()) == start {
             continue;
-        }
-        let Some(cause) = nullable.rules.get(name) else {
+        }        let Some(cause) = nullable.rules.get(name) else {
             continue;
         };
         let uses = nullable.references.get(name).map_or(&[][..], Vec::as_slice);
@@ -844,6 +873,13 @@ fn document(
         "name".to_owned(),
         Json::str(ast.name.as_ref().map_or("", |(n, _)| n.as_str())),
     ));
+
+    // Only when the author named it: an implicitly chosen start rule is
+    // `rules[0]` already, and emitting the key would change every existing
+    // `grammar.json` byte for byte.
+    if let Some((start, _)) = &ast.start {
+        entries.push(("start".to_owned(), Json::str(start)));
+    }
 
     if let Some((inherits, _)) = &ast.inherits {
         entries.push(("inherits".to_owned(), Json::str(inherits)));
@@ -1805,6 +1841,95 @@ r: field= 'x';
             "{}",
             error.msg
         );
+    }
+
+    // ------------------------------ `%start` ---------------------------------
+
+    /// The directive exists so that rule *order* stops deciding the entry point:
+    /// the name is written to `grammar.json`, and the rules keep the order the
+    /// author gave them.
+    #[test]
+    fn a_start_directive_names_the_entry_point_and_keeps_rule_order() {
+        let json = ok(r"
+            %name foo;
+            %start second;
+            first: 'a';
+            second: 'b';
+            ");
+        assert!(json.contains("\"start\": \"second\""), "{json}");
+        // Look for the rule *keys*, not for the name in the `start` value.
+        let first = json.find("\"first\": {\n").expect("first rule");
+        let second = json.find("\"second\": {\n").expect("second rule");
+        assert!(
+            first < second,
+            "`%start` must not reorder the rules it names:\n{json}"
+        );
+    }
+
+    #[test]
+    fn without_a_start_directive_no_start_key_is_emitted() {
+        // Every existing grammar has to keep compiling to the same bytes.
+        let json = ok(r"
+            %name foo;
+            file: 'a';
+            ");
+        assert!(!json.contains("\"start\""), "{json}");
+    }
+
+    #[test]
+    fn a_start_directive_naming_a_token_is_rejected_at_the_directive() {
+        let src = r"
+            %name foo;
+            %start A;
+            tokens { A: 'a'; }
+            file: 'b';
+            ";
+        let error = err(src);
+        assert!(
+            error.msg.contains("`%start` names the token `A`"),
+            "{}",
+            error.msg
+        );
+        assert_eq!(&src[error.span.start..error.span.end], "A");
+    }
+
+    #[test]
+    fn a_start_directive_naming_no_rule_is_rejected() {
+        let error = err(r"
+            %name foo;
+            %start missing;
+            file: 'a';
+            ");
+        assert!(
+            error.msg.contains("`%start` names `missing`, which is not a rule"),
+            "{}",
+            error.msg
+        );
+    }
+
+    #[test]
+    fn a_start_directive_can_name_a_nullable_rule() {
+        // The start rule is the one place emptiness is allowed, and `%start` is
+        // what makes that exemption nameable rather than positional.
+        let json = ok(r"
+            %name foo;
+            %start empty;
+            other: 'a';
+            empty: ();
+            ");
+        assert!(json.contains("\"start\": \"empty\""), "{json}");
+    }
+
+    #[test]
+    fn fmt_keeps_a_start_directive_and_the_rule_order() {
+        let src = "%name foo;\n%start second;\nfirst: 'a';\nsecond: 'b';\n";
+        let printed = crate::emit::fmt(src).expect("formattable").text;
+        assert!(printed.contains("%start second;"), "{printed}");
+        assert!(
+            printed.find("first:").unwrap() < printed.find("second:").unwrap(),
+            "{printed}"
+        );
+        assert_eq!(ok(&printed), ok(src), "--fmt must not change the grammar");
     }
 
     #[test]

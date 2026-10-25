@@ -70,6 +70,7 @@ pub fn translate(grammar: &Grammar, options: &Options) -> Result<Translation, St
         }
     }
     // Bison's default start symbol is the first rule.
+    let declared_start = start.is_some();
     let start = start
         .or_else(|| grammar.rules.first().map(|rule| rule.lhs.clone()))
         .ok_or("the source has no rules")?;
@@ -355,6 +356,11 @@ pub fn translate(grammar: &Grammar, options: &Options) -> Result<Translation, St
     }
     lines.push(String::new());
     lines.push(format!("%name {};", options.name));
+    if declared_start {
+        // Keep the declaration: it is the difference between "this rule starts
+        // the tree" and "this rule happens to come first".
+        lines.push(format!("%start {start};"));
+    }
     lines.push(String::new());
     for region in &pushdown {
         lines.push(format!(
@@ -493,7 +499,12 @@ pub fn translate(grammar: &Grammar, options: &Options) -> Result<Translation, St
         }
     }
     lines.push(String::new());
-    lines.push("// The first rule outside `tokens` is the start rule.".to_string());
+    if declared_start {
+        lines.push("// Bison named the start symbol with `%start`.".to_string());
+    } else {
+        lines.push("// Bison named no start symbol, so its default holds: the first rule.".to_string());
+    }
+    lines.push("// The start rule is written first.".to_string());
     lines.push(String::new());
 
     let emit_order = std::iter::once(&start).chain(order.iter().filter(|lhs| **lhs != start));

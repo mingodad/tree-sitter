@@ -490,6 +490,7 @@ A("//     accepted by this source (its `dolq` start conditions only approximate"
 A("//     them).  `BCONST`/`XCONST` match the literal words, as in the source.")
 A("")
 A("%name postgres;")
+A("%%start %s;" % start)
 A("")
 A("tokens {")
 keyword_order = [name for name in tokens if name in spell and name not in la_of]
@@ -547,7 +548,8 @@ A("// Conflicts, all translation artifacts (Bison's grammar has none).")
 for pair in CONFLICTS:
     A("%%conflicts %s;" % " ".join(pair))
 A("")
-A("// The first rule outside `tokens` is the start rule.")
+A("// Bison named the start symbol with `%start`.")
+A("// The start rule is written first.")
 A("")
 emit_order = [start] + [lhs for lhs in order if lhs != start]
 for lhs in emit_order:
