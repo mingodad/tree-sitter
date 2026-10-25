@@ -17,6 +17,10 @@ it will exit with a `Unresolved conflict` error message. To learn more about con
 the section on [`Structuring Rules Well`](../creating-parsers/3-writing-the-grammar.md#structuring-rules-well)
 in the user guide.
 
+A grammar that is ported from another parser generator usually has several independent conflicts. Rather than stopping
+at the first one, `generate` reports all of them in a single run, with the `conflicts` entry that each one needs. Pass
+[`--json-summary`](#--json-summary) to get the item sets behind each conflict.
+
 ## Generated files
 
 - `src/parser.c` implements the parser logic specified in the grammar.

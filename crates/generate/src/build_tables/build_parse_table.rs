@@ -350,6 +350,12 @@ struct ParseTableBuilder<'a> {
     auxiliary_contexts: AuxiliarySymbolContexts,
     non_terminal_extra_states: Vec<(Symbol, ParseStateId)>,
     actual_conflicts: FxHashSet<Vec<Symbol>>,
+    /// Conflicts that the grammar does not declare, collected instead of aborting at
+    /// the first one.
+    unresolved_conflicts: Vec<ConflictError>,
+    /// Symbol sets already in `unresolved_conflicts`, so a pair is reported once no
+    /// matter how many states run into it.
+    unresolved_conflict_keys: FxHashSet<Vec<Symbol>>,
     parse_table: ParseTable,
     /// The pool index of each action list interned into `parse_table` so far.
     action_list_ids: FxHashMap<ActionList, u32>,
@@ -370,6 +376,8 @@ pub type BuildTableResult<T> = Result<T, ParseTableBuilderError>;
 pub enum ParseTableBuilderError {
     #[error("Unresolved conflict for symbol sequence:\n\n{0}")]
     Conflict(Box<ConflictError>),
+    #[error("{}", display_conflicts(.0))]
+    Conflicts(Vec<ConflictError>),
     #[error("Extra rules must have unambiguous endings. Conflicting rules: {0}")]
     AmbiguousExtra(#[from] AmbiguousExtraError),
     #[error(
@@ -391,6 +399,48 @@ impl From<ConflictError> for ParseTableBuilderError {
     fn from(error: ConflictError) -> Self {
         Self::Conflict(Box::new(error))
     }
+}
+
+fn display_conflicts(errors: &[ConflictError]) -> String {
+    // One conflict keeps the detailed report, which explains the item sets and the
+    // precedence/associativity that would resolve it. Several at once get a summary:
+    // a grammar ported from yacc can produce a dozen of them, and each conflict can
+    // have hundreds of interpretations, which nobody reads in one message.
+    let [error] = errors else {
+        let mut message = format!(
+            "Unresolved conflicts for {} symbol sequences. Each one needs a `conflicts` \
+             entry, or a precedence that resolves it:",
+            errors.len(),
+        );
+        for (i, error) in errors.iter().enumerate() {
+            let mut sequence = error
+                .symbol_sequence
+                .iter()
+                .map(|symbol| format!("{symbol} "))
+                .collect::<String>();
+            sequence.push_str("•  ");
+            sequence.push_str(&error.conflicting_lookahead);
+            sequence.push_str("  …");
+            let rules = error
+                .possible_resolutions
+                .iter()
+                .find_map(|resolution| match resolution {
+                    Resolution::AddConflict { symbols } => Some(
+                        symbols
+                            .iter()
+                            .map(|symbol| format!("`{symbol}`"))
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    ),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            message.push_str(&format!("\n  {}. {sequence}\n     {rules}", i + 1));
+        }
+        message.push_str("\n\nUse `--json-summary` to see the item sets behind each conflict.");
+        return message;
+    };
+    format!("Unresolved conflict for symbol sequence:\n\n{error}")
 }
 
 #[derive(Default, Debug, Serialize, Error, Deserialize, PartialEq, Eq)]
@@ -586,6 +636,8 @@ impl<'a> ParseTableBuilder<'a> {
             parse_state_queue: VecDeque::new(),
             auxiliary_contexts: AuxiliarySymbolContexts::default(),
             actual_conflicts: syntax_grammar.expected_conflicts.iter().cloned().collect(),
+            unresolved_conflicts: Vec::new(),
+            unresolved_conflict_keys: FxHashSet::default(),
             parse_table: ParseTable {
                 states: Vec::new(),
                 action_lists: ActionListPool::default(),
@@ -729,6 +781,10 @@ impl<'a> ParseTableBuilder<'a> {
                 entry.state_id,
                 &item_set,
             )?;
+        }
+
+        if !self.unresolved_conflicts.is_empty() {
+            return Err(ParseTableBuilderError::Conflicts(self.unresolved_conflicts));
         }
 
         if !self.actual_conflicts.is_empty() {
@@ -1504,9 +1560,15 @@ impl<'a> ParseTableBuilder<'a> {
                     .collect(),
             });
 
-        self.actual_conflicts.insert(actual_conflict);
+        // Keep both actions, as if the conflict had been declared, and keep building:
+        // the tables are discarded anyway, and carrying on is what finds the conflicts
+        // in the states behind this one. Bison reports conflicts the same way, instead
+        // of stopping at the first one.
+        if self.unresolved_conflict_keys.insert(actual_conflict) {
+            self.unresolved_conflicts.push(conflict_error);
+        }
 
-        Err(conflict_error)?
+        Ok(())
     }
 
     fn compare_precedence(
