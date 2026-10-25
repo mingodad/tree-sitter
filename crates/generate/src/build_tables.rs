@@ -122,16 +122,24 @@ pub fn build_tables(
     max_states: Option<usize>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> BuildTableResult<Tables> {
-    let timing = std::env::var_os("TS_DEBUG_TIMING").is_some();
     let mut stage_time = std::time::Instant::now();
     macro_rules! stage {
         ($name:expr) => {
-            if timing {
+            stage!($name, String::new)
+        };
+        ($name:expr, $detail:expr) => {
+            if log::log_enabled!(log::Level::Debug) {
                 let now = std::time::Instant::now();
-                eprintln!(
-                    "  stage {:24} {:>8.2}s",
+                let detail = $detail();
+                debug!(
+                    "  stage {:20} {:>8.2}s{}",
                     $name,
-                    now.duration_since(stage_time).as_secs_f64()
+                    now.duration_since(stage_time).as_secs_f64(),
+                    if detail.is_empty() {
+                        detail
+                    } else {
+                        format!(" {detail}")
+                    },
                 );
                 let _ = std::mem::replace(&mut stage_time, now);
             }
@@ -154,8 +162,13 @@ pub fn build_tables(
         diagnostics,
     )?;
     stage!("parse_table");
+    let token_count = lexical_grammar.variables.len();
     let token_conflict_map = TokenConflictMap::new(lexical_grammar, following_tokens);
-    stage!("token_conflicts");
+    stage!("token_conflicts", || format!(
+        "{} tokens, {} threads",
+        token_count,
+        token_conflicts::pair_workers(token_count)
+    ));
     let coincident_token_index =
         CoincidentTokenIndex::new(&parse_table, lexical_grammar, syntax_grammar.word_token);
     stage!("coincident_tokens");

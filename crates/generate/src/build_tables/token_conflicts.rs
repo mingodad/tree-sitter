@@ -44,6 +44,20 @@ pub struct TokenConflictMap {
     pub(crate) row_words: usize,
 }
 
+/// How many threads the conflict matrix is split across for `n` tokens.
+///
+/// Every pair of tokens is analyzed independently, so this is the one part of
+/// table generation that parallelizes trivially. It needs it: the work is
+/// quadratic in the token count, and grammars for real languages have hundreds
+/// of tokens. Small grammars stay single-threaded, where spawning costs more
+/// than the work.
+pub(crate) fn pair_workers(n: usize) -> usize {
+    std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(n / 16)
+        .max(1)
+}
+
 impl TokenConflictMap {
     /// Create a token conflict map based on a lexical grammar, which describes the structure
     /// of each token, and a `following_token` map, which indicates which tokens may appear
@@ -65,17 +79,7 @@ impl TokenConflictMap {
 
         let n = grammar.variables.len();
         let mut status_matrix = vec![TokenConflictStatus::empty(); n * n];
-        let debug = std::env::var_os("TS_DEBUG_CONFLICTS").is_some();
-        let debug_start = std::time::Instant::now();
-
-        // Every pair of tokens is analyzed independently, so this is the one
-        // part of table generation that parallelizes trivially. It matters:
-        // the work is quadratic in the token count, and grammars for real
-        // languages have hundreds of tokens.
-        let thread_count = std::thread::available_parallelism()
-            .map_or(1, std::num::NonZeroUsize::get)
-            .min(n / 16)
-            .max(1);
+        let thread_count = pair_workers(n);
         let mut pair_rows = Vec::with_capacity(n);
         if thread_count > 1 {
             let rows = std::thread::scope(|scope| {
@@ -137,15 +141,6 @@ impl TokenConflictMap {
                 status_matrix[matrix_index(n, j, i)] = reverse;
             }
         }
-        if debug {
-            eprintln!(
-                "conflict matrix: {} tokens, {} threads, {:.2}s",
-                n,
-                thread_count,
-                debug_start.elapsed().as_secs_f64()
-            );
-        }
-
         // Precompute per-row bitsets for vectorized check_token_conflicts.
         let row_words = n.div_ceil(64);
         let conflict_mask = TokenConflictStatus::DOES_MATCH_VALID_CONT

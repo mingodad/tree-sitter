@@ -2,6 +2,7 @@ use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet, VecDeque},
     hash::{BuildHasher as _, BuildHasherDefault},
+    io::IsTerminal as _,
     num::NonZeroU32,
     time::{Duration, Instant},
 };
@@ -680,6 +681,11 @@ impl<'a> ParseTableBuilder<'a> {
             self.non_terminal_extra_states.push((terminal, state_id));
         }
 
+        // Slow grammars used to fail with no output at all. One line every couple of
+        // seconds tells "working" from "stuck". Only write it to a terminal (or when
+        // debug logging was asked for), so that stderr stays clean in a pipe.
+        let report_progress =
+            std::io::stderr().is_terminal() || log::log_enabled!(log::Level::Debug);
         let started = Instant::now();
         let mut last_progress = started;
         while let Some(entry) = self.parse_state_queue.pop_front() {
@@ -689,10 +695,7 @@ impl<'a> ParseTableBuilder<'a> {
                 return Err(ParseTableBuilderError::TooManyStates { max });
             }
 
-            // Slow grammars used to fail with no output at all. One line every
-            // couple of seconds is enough to tell "working" from "stuck", and
-            // costs nothing for grammars that finish quickly.
-            if last_progress.elapsed() >= Duration::from_secs(2) {
+            if report_progress && last_progress.elapsed() >= Duration::from_secs(2) {
                 eprintln!(
                     "  {} parse states, {} queued, {:.1}s ({})",
                     self.parse_table.states.len(),
