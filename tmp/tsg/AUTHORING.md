@@ -161,3 +161,30 @@ Toolchain: `bin/tree-sitter` is the **patched** build (release, stripped, 8.4 MB
 of `/Volumes/RamDisk/tree-sitter` at `0001`–`0009`; the gates default to it
 (`TS=` overrides).  `postgres16` and `bc` need `--lalr` and therefore cannot run
 on stock 0.28.0.
+
+## 9. Explicit start rule — anchors for the patch
+
+The start rule is positional: `InputGrammar.variables` (`grammars.rs:41`) is in
+JSON order and everything downstream takes `variables.first()` as the start
+(`parse_grammar.rs:151`, the "used" DFS in `normalize`).  So `"start": "name"`
+needs no new field threaded through the pipeline — the rule named must simply
+be **promoted to `variables[0]`** when the JSON is read, and rotated relative
+to nothing else.  Three edits:
+
+1. `parse_grammar.rs`: `#[serde(default)] start: Option<String>` on
+   `GrammarJSON`; after the rules map becomes `variables`, find the index of
+   `start` and rotate it to the front.  Two errors worth having: `start` names
+   no rule ("no rule called `x`; the rules are …"), and `start` names a token
+   (a token cannot be the start rule).  `deny_unknown_fields` already makes an
+   old generator reject the key instead of ignoring it.
+2. `tsg`: `%start name;` → `"start": "name"`, with the same two checks in
+   `compile.rs` (it already reports "the first non-token rule is the start
+   rule", so the prose can go away); `--from-json` emits `%start` only when the
+   start is not the first rule.
+3. `g2tsg`: pass Bison's `%start` through instead of relying on file order.
+
+Corpus reality (measured): 241 of 358 `.g` files declare `%start` and in every
+one it is also the first rule, so this unblocks nothing today.  Its value is
+that rule order stops being load-bearing and invisible.  Batch it with the
+generator-only items (`state ids in conflict messages`, `unreachable token`)
+because each generator change costs one rebuild plus one re-export.
