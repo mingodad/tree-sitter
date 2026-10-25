@@ -153,6 +153,7 @@ pub fn prepare_grammar(
     let mut out = ProductionStore::default();
     flatten_grammar(&g, &ext_meta, &mut state, &mut out)?;
     validate_indirect_recursion(&g, &out)?;
+    diagnose_unproductive_rules(&g, &out, diagnostics);
     validate_extras(&g, &ext_meta.extra_symbols, &lexical_grammar, &out)?;
 
     let default_aliases =
@@ -167,6 +168,78 @@ pub fn prepare_grammar(
         default_aliases,
         str_pool,
     })
+}
+
+/// Report rules that can never match anything.
+///
+/// A rule is productive when one of its productions needs only productive steps:
+/// a token always consumes at least one byte, and an external token's scanner
+/// decides for itself, so both count as productive. A rule whose every
+/// production needs a rule that can never match derives no sentence, and no
+/// parser state can ever reduce to it — which is the usual shape of a rule that
+/// lost its base case (`a: a b;` with no `a: b;`) or needs a token that nothing
+/// lexes. Bison reports the same input as "nonterminal useless in grammar";
+/// without it, such a grammar generates a parser, and the rule silently never
+/// appears in a tree.
+///
+/// The worklist makes this linear in the number of steps: a rule becomes
+/// productive when one of its productions has no unproductive steps left, and
+/// each production is revisited once per rule it mentions.
+fn diagnose_unproductive_rules(
+    grammar: &InputGrammar,
+    productions: &ProductionStore,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let rule_count = productions.var_prods.len();
+
+    // The rule that owns each production, so a production can make its owner
+    // productive, and, for each rule, the productions that name it.
+    let mut owner = vec![0u32; productions.productions.len()];
+    for (index, &(start, end)) in productions.var_prods.iter().enumerate() {
+        owner[start as usize..end as usize].fill(index as u32);
+    }
+    let mut mentions = vec![Vec::new(); rule_count];
+    let mut unmet = Vec::with_capacity(productions.productions.len());
+    for (id, production) in productions.productions.iter().enumerate() {
+        let mut count = 0;
+        for step in &productions.steps[production.step_range()] {
+            if let SymbolView::NonTerminal(index) = step.symbol().view() {
+                count += 1;
+                mentions[usize::from(index)].push(id as u32);
+            }
+        }
+        unmet.push(count);
+    }
+
+    let mut productive = BitVec::new();
+    productive.resize(rule_count, false);
+    let mut queue: Vec<u32> = (0..unmet.len() as u32)
+        .filter(|&id| unmet[id as usize] == 0)
+        .collect();
+    while let Some(id) = queue.pop() {
+        let rule = owner[id as usize] as usize;
+        // The owner was made productive by an earlier production of its own, and
+        // that is when every production naming it was marked.
+        if productive.get(rule) == Some(true) {
+            continue;
+        }
+        productive.set(rule, true);
+        for &other in &mentions[rule] {
+            let left = &mut unmet[other as usize];
+            *left -= 1;
+            if *left == 0 {
+                queue.push(other);
+            }
+        }
+    }
+
+    for (index, variable) in grammar.variables.iter().enumerate() {
+        if productive.get(index) != Some(true) {
+            diagnostics.push(Diagnostic::UnproductiveRule {
+                name: grammar.pool.resolve(variable.name).into(),
+            });
+        }
+    }
 }
 
 /// Check for indirect recursion cycles in the grammar that can cause infinite loops while
