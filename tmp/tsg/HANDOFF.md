@@ -1044,8 +1044,11 @@ Exit 0 means "same grammar", 1 means "different", 2 means a usage error.  Up to
 20 differences are printed with their path (`rules.BCONST.content.value`), so a
 failure names the rule and the field instead of the line number.
 
-This is what the `.g` gates should compare with instead of `cmp`: `cmp` fails on
-a comment change in `g2tsg` and cannot say which rule drifted.
+`postgres16/check.sh` and `antlr/check.sh` now compare this way: `--diff` decides
+whether the committed `.tsg` is still the translation, and `cmp` only distinguishes
+"byte-for-byte copy" from "same grammar, different comments" (a note, not a
+failure).  Verified by appending a stray `//` comment to `antlr/grammar.tsg`: the
+gate stays green and prints the note instead of a 4 000-line diff.
 
 ### Why there is no `tsg fmt` yet
 

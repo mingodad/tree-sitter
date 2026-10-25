@@ -48,10 +48,15 @@ export XDG_CACHE_HOME="$work/cache"
     --title "ANTLR 4.5 grammars, translated from antlr-v4.5.g (Bison + Flex)." \
     > "$work/gen.log" 2>&1 || { cat "$work/gen.log" >&2; exit 1; }
 sed 's/^note: /note: /' "$work/gen.log" >&2
-if ! cmp -s "$here/grammar.tsg" "$work/gen.tsg"; then
-    echo "FAIL grammar.tsg is stale; the new translation is $work/gen.tsg" >&2
-    diff "$here/grammar.tsg" "$work/gen.tsg" | head >&2
+#    Compare grammars, not text: `tsg --diff` ignores comments and formatting and
+#    names the rule and field that drifted.  The `cmp` below still runs, to say
+#    when the committed copy is not a byte-for-byte copy of the translation.
+if ! "$tsg" "$here/grammar.tsg" --diff "$work/gen.tsg" >&2; then
+    echo "FAIL grammar.tsg is not the same grammar as the new translation $work/gen.tsg" >&2
     exit 1
+fi
+if ! cmp -s "$here/grammar.tsg" "$work/gen.tsg"; then
+    echo "note: grammar.tsg and $work/gen.tsg differ only in comments or formatting" >&2
 fi
 
 # 2. `tsg` accepts the translated grammar, and `tree-sitter generate` finds no
