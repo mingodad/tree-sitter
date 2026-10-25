@@ -53,6 +53,13 @@ order the fallback targets before the fallback token and emit nothing new.
   Also in the same pass: turn the 23 silently swallowed constructs and the
   `%expect` / mid-rule-action / `%type` cases into reported notes.
 - Gate: `bison_flex/check.sh`, plus the sweep number in `HANDOFF.md`.
+- **Done**: 288 → **301** translate, 66 → 52 rejected, 4 → 5 invalid (17 files
+  no longer stop at `%fallback`; 13 go on to hit the nullable-mid-body gap in
+  item 3, 3 the dead-token gap, and `sablecc3x.g` translates to a `.tsg` that
+  `tsg` rejects because of a `.` in a rule name).  The notes half measured
+  differently than this file assumed: `%union` / `%type` / `%expect` /
+  `%token_*` are *refused* with a position by the metagrammar, not swallowed, so
+  nothing silent is left to report there.
 
 ### 2. A real lexer section, compiled to `scanner.c`  (~1 week)
 

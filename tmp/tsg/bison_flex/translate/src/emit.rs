@@ -45,6 +45,7 @@ pub fn translate(grammar: &Grammar, options: &Options) -> Result<Translation, St
     let mut tokens = Vec::new();
     let mut literals = Vec::new();
     let mut levels = Vec::new();
+    let mut fallback: Vec<(String, Vec<String>)> = Vec::new();
     let mut start = None;
 
     for directive in &grammar.directives {
@@ -60,6 +61,9 @@ pub fn translate(grammar: &Grammar, options: &Options) -> Result<Translation, St
             }
             Directive::Assoc { assoc, terms } => levels.push((*assoc, terms.clone())),
             Directive::Start(name) => start = Some(name.clone()),
+            Directive::Fallback { target, tokens: specific } => {
+                fallback.push((target.clone(), specific.clone()))
+            }
             Directive::Unsupported(keyword) => {
                 return Err(format!("`{keyword}` is not translated yet"));
             }
@@ -178,6 +182,26 @@ pub fn translate(grammar: &Grammar, options: &Options) -> Result<Translation, St
     for region in &pushdown {
         if !declared.contains(&region.token) {
             tokens.push(region.token.clone());
+        }
+    }
+
+    // `%fallback FALLBACK tok…`: in a state that cannot use `tok`, the scanner
+    // returns `FALLBACK`. tree-sitter gets that for free — its lexer only
+    // produces tokens the state accepts — but only if `tok` comes first: an
+    // earlier token wins a lexer tie, and the specific token has to win where
+    // it is the valid one.
+    for (target, specific) in &fallback {
+        for name in specific {
+            let (Some(from), Some(to)) = (
+                tokens.iter().position(|token| token == name),
+                tokens.iter().position(|token| token == target),
+            ) else {
+                continue;
+            };
+            if from > to {
+                let token = tokens.remove(from);
+                tokens.insert(to, token);
+            }
         }
     }
     let bodies_for = |tokens: &[String]| -> Result<Vec<(String, String)>, String> {

@@ -217,38 +217,47 @@ running `g2tsg` over all of them and then `tsg` over each output is the only
 honest measure of how general the translation is:
 
 ```
-284  translate to a `.tsg` that `tsg` accepts
- 70  rejected by `g2tsg`, with a file:line:col and a reason
-  4  translated, but the `.tsg` is not valid
+301  translate to a `.tsg` that `tsg` accepts
+ 52  rejected by `g2tsg`, with a file:line:col and a reason
+  5  translated, but the `.tsg` is not valid
 ```
 
-That is 6 fewer accepted grammars than before the `antlr-v4.5` run, and on
+`%fallback` accounts for 17 of those: `%fallback ID WITH WHEN` says that where
+the parser cannot use `WITH`, the scanner gives `ID` instead. tree-sitter does
+that for free — its lexer only produces tokens the state accepts — so the whole
+translation is the order of the `tokens` block: the specific token has to come
+before the fallback one, or it loses the lexer tie.
+
+That 301 is 6 fewer than before the `antlr-v4.5` run, and on
 purpose: 16 files used to lose their start rule to the dead-production cascade
 and then have the *next* rule promoted to start symbol — a parser for the wrong
 language, accepted in silence. They now fail with "every production of `X` — the
 start rule — needs `CODE` the lexer never returns". See `../../DOGFOOD.md`.
 
-The 4 are one-offs (a `%prec` for a level that no directive declares, a `_LA`
-token whose base token nothing lexes, a rule left with no alternative). The 64
-fall into four buckets, and none of them is a parsing problem — the metagrammar
+The 5 are one-offs (a `%prec` for a level that no directive declares, a `_LA`
+token whose base token nothing lexes, a rule left with no alternative, a `.` in a
+rule name). The 52
+fall into these buckets, and none of them is a parsing problem — the metagrammar
 read every one of those files:
 
 | count | reason | whose gap |
 | --- | --- | --- |
 | 16 | every production of the start rule needs a token the lexer never returns | Flex cannot express modes/actions |
-| 10 | `A` is nullable and refers to itself in the middle of a body | tree-sitter: no empty production |
-| 17 | `%fallback`, `%token_indent`, … is not translated yet | the translator |
+| 13 | `A` is nullable and refers to itself in the middle of a body | tree-sitter: no empty production |
 | 10 | `[...]`, `(...)`, `{...}` groups are not translated yet | the translator (needs fresh rule names) |
 | 9 | `unexpected …` / `expected …` | not a Bison file (the corpus mixes in ANTLR, Lark, PEG, BNFC) |
 | 3 | the source has no rules | not a Bison file |
-| 10 | one-offs | the translator |
+| 4 | one-offs | the translator |
 
-The 10 nullable ones are the interesting number: `q : q a q` with a nullable `a`
+The 13 nullable ones are the interesting number: `q : q a q` with a nullable `a`
 is exactly the shape tree-sitter cannot express, and it is the same gap that
-makes `postgres16.g` explode into 8000 flattened productions. A `%fallback`
-(`%fallback ID WITH WHEN` — "where `ID` is valid, a `WITH` is one") has no
-tree-sitter equivalent either, which is why those 17 files are refused instead of
-approximated.
+makes `postgres16.g` explode into 8000 flattened productions.
+
+`%fallback` was the last construct that looked like it had no tree-sitter
+equivalent. The ones that really do not are `%union` / `%type` / `%expect` and
+the `%token_*` family: the metagrammar does not model them, so they are refused
+with a position (measured on hand-written probes, not assumed), never dropped —
+the same rule the rest of the translator follows.
 
 ## Limits
 
@@ -258,7 +267,8 @@ approximated.
 * `[...]`, `(...)`, `{...}` groups and `*`/`+` postfix operators are rejected,
   not translated: each one needs a fresh rule name, which is a naming decision
   the tool cannot make. `postgres16.g` uses none of them; the corpus does.
-* `%fallback` and the `%token_*` directives are recognized by the metagrammar and
+* `%fallback` is translated (see above); the `%token_*` directives are
+  recognized by the metagrammar and
   rejected by the translator rather than ignored. `%prec` of a token that no
   precedence directive mentions is dropped: Bison gives that token the level
   `none`, which is what an unannotated alternative already has.

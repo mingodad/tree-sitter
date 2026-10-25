@@ -673,6 +673,12 @@ the dead-production cascade and used to have the next rule promoted to start
 symbol without a word. They are now errors — a smaller number that means
 "correct or refused" is the one to trust. `DOGFOOD.md` explains.)
 
+That block is the measurement before `%fallback` was translated.  After it
+(`bison_flex/translate/README.md` §"What the corpus says", same harness): **301
+translate / 52 rejected / 5 invalid**.  The 17 `%fallback` files moved: 13 now
+stop at the nullable-mid-body gap, 3 at the dead-token gap, 1 translates but
+`tsg` rejects it (a `.` in a rule name).
+
 The 64 (the metagrammar read every one of them — these are translation gaps, not
 parse failures):
 

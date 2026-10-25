@@ -24,8 +24,11 @@ pub enum Directive {
     Assoc { assoc: Assoc, terms: Vec<String> },
     /// `%start name`.
     Start(String),
-    /// `%fallback`, `%token_indent`, `%token_symbol_table`, … The metagrammar
-    /// recognizes these but nothing translates them yet.
+    /// `%fallback FALLBACK tok…`: in a state where the parser cannot use one of
+    /// `tok…`, the scanner returns `FALLBACK` instead.
+    Fallback { target: String, tokens: Vec<String> },
+    /// `%token_indent`, `%token_symbol_table`, … The metagrammar recognizes
+    /// these but nothing translates them yet.
     Unsupported(String),
 }
 

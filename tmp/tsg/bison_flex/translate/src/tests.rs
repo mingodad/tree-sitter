@@ -135,6 +135,23 @@ fn precedence_levels_are_reversed_and_prec_names_one() {
 }
 
 #[test]
+fn a_fallback_token_is_offered_after_its_specific_tokens() {
+    // `%fallback Y X` says: where the parser cannot use `X`, the scanner gives
+    // `Y`. tree-sitter's lexer only produces tokens the state accepts, so the
+    // whole translation is the order in the `tokens` block: `X` must come
+    // first, or it loses the lexer tie to `Y`.
+    let text = translate(&source(
+        "%token Y\n%token X\n%fallback Y X",
+        "s : Y X ;",
+        "[x]+ X\n[y]+ Y",
+    ));
+    assert!(!text.contains("%fallback"), "{text}");
+    let x = text.find("  X:").expect("X has a body");
+    let y = text.find("  Y:").expect("Y has a body");
+    assert!(x < y, "X is the specific token and has to be offered first\n{text}");
+}
+
+#[test]
 fn a_lookahead_token_becomes_its_base_token() {
     // `X_LA` is lexed by a start-condition block that only looks ahead, so the
     // token in the grammar is `X` and the lookahead rule disappears.

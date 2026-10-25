@@ -299,11 +299,26 @@ fn read_directive(node: &Node, source: &[u8]) -> Result<Option<Directive>, Input
                 .unwrap_or_default();
             Ok(Some(Directive::Start(name)))
         }
+        // `%fallback FALLBACK tok…`: the first symbol is the token the parser
+        // falls back to when it cannot use one of the others in that state.
+        "PercentFallback" => {
+            let mut symbols = declared_symbols(&children[1..], source)?;
+            if symbols.is_empty() {
+                return Err(InputError::at(
+                    keyword,
+                    "`%fallback` needs a fallback token and at least one token that falls back to it",
+                ));
+            }
+            let target = symbols.remove(0);
+            Ok(Some(Directive::Fallback {
+                target,
+                tokens: symbols,
+            }))
+        }
         // Recognized by the metagrammar, but nothing translates them yet, and
         // ignoring a declaration silently is how a grammar ends up subtly
         // different from its source.
-        "PercentFallback"
-        | "PercentTokenIndent"
+        "PercentTokenIndent"
         | "PercentTokenDedent"
         | "PercentTokenSymbolTable" => Ok(Some(Directive::Unsupported(keyword.kind().to_string()))),
         other => Err(InputError::at(
