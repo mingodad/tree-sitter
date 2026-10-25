@@ -1,0 +1,29 @@
+{
+  "name": "repeat_with_nullable_prefix",
+  "rules": {
+    "decorated": {
+      "type": "REPEAT",
+      "content": {
+        "type": "SEQ",
+        "members": [
+          { "type": "SYMBOL", "name": "tag_opt" },
+          { "type": "STRING", "value": "a" }
+        ]
+      }
+    },
+    "tag_opt": {
+      "type": "CHOICE",
+      "members": [
+        { "type": "BLANK" },
+        { "type": "SYMBOL", "name": "tag" }
+      ]
+    },
+    "tag": { "type": "PATTERN", "value": "t+" }
+  },
+  "extras": [{ "type": "PATTERN", "value": "\\s+" }],
+  "conflicts": [],
+  "precedences": [],
+  "externals": [],
+  "inline": [],
+  "supertypes": []
+}
