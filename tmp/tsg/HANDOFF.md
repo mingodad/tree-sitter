@@ -1061,3 +1061,40 @@ must not eat.  A formatter therefore has to print from the AST (`parser.rs`
 block.  Measured cost of the shortcut: `tsg postgres16/grammar.tsg -o g.json &&
 tsg -r g.json` loses exactly those 27 header lines and 4 390 diff lines overall.
 Until that printer exists, use `--diff` to compare and leave whitespace alone.
+
+## `tsg --fmt` and `--check`
+
+`fmt` re-prints a `.tsg` from its AST — not from `grammar.json`, because the AST
+is the only place the authoring sugar survives (`?`, `@left(name)`, `$field`,
+`tokens { … }`).  It normalizes layout only: one directive per line, one
+alternative per line with `  |` continuations, no alignment, minimal parentheses
+recomputed from the AST, one quote style per literal.  It never reorders rules
+(rule order is the start rule), alternatives, precedence levels or token bodies.
+
+Two properties, checked by running the 31 hand-written grammars through it:
+
+* **same grammar** — `tsg X --diff <(tsg --fmt X)`, which is now a one-liner;
+* **idempotent** — `fmt(fmt(X)) == fmt(X)` byte for byte.
+
+Three bugs the sweep found, all fixed: the `token(…)` wrapper the parser adds to
+`tokens { }` bodies was printed back (nesting `TOKEN(TOKEN(…))`); the block was
+hoisted to the top of the file, which changes the start rule when the block sits
+late (as in `examples/tsg.tsg`); and a rule named `field` was printed bare,
+where it re-parses as the DSL's two-argument `field(…)` call — it now prints
+`$field`, exactly as the source comment in `lua53/grammar.tsg` warns.
+
+`--check` is for CI: it writes nothing and exits 1 when the file is not
+canonical.  **No committed grammar is canonical yet** (all 29 differ), because
+of the known limitation below; running `tsg --fmt -o file` once would fix each,
+but that is a deliberate, reviewable reformat, not something a hook should do
+behind the author's back.
+
+### Known limitation: comments
+
+Comments exist only in the source text, and the AST has no comment nodes.  `fmt`
+keeps the **leading comment block verbatim** — that is where these grammars put
+their program notes — and reports the number of interior comment lines it did
+not carry (never silently).  Making it lossless means re-inserting comments by
+span between the items that own them (rules and directives both carry spans);
+that is the next step, and until it exists `--diff`, which ignores comments
+entirely, is the way to compare a reformatted file with its original.

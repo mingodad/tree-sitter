@@ -24,6 +24,7 @@
 
 pub mod compile;
 pub mod diff;
+pub mod emit;
 pub mod json;
 pub mod json_read;
 pub mod lexer;
