@@ -102,7 +102,7 @@ $ tsg --annotate examples/named_precedences.tsg | head -14
 %precedence member_expression 'and' 'or';
 %precedence nested_type 'type_intersection' 'type_union';
 
-// matches nothing, which is legal only for the start rule — and this is that rule
+// can match nothing: it reduces to a zero-width node wherever it is used
 program:
     repeat(choice(expression_statement, declaration_statement));
 ```

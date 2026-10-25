@@ -62,20 +62,43 @@ fn notes(ast: &GrammarAst) -> Notes {
         );
     }
 
-    // Nonterminals: emptiness (a hard error unless it is the start rule) and
-    // which alternatives a precedence level marks.
+    // Nonterminals: emptiness (legal, unless it is circular) and which
+    // alternatives a precedence level marks.
+    let mut circles: BTreeMap<String, String> = BTreeMap::new();
+    for cycle in nullable::epsilon_cycles(ast, &empty) {
+        let names = cycle
+            .rules
+            .iter()
+            .map(|rule| format!("`{rule}`"))
+            .collect::<Vec<_>>();
+        let text = if let Some(only) = names.first().filter(|_| names.len() == 1) {
+            format!(
+                "matches nothing and reaches itself, so the parser would reduce {only} forever: \
+                 the compiler refuses this"
+            )
+        } else {
+            format!(
+                "{} can each match nothing only through the others, so the parser would reduce \
+                 them forever: the compiler refuses this",
+                names.join(", ")
+            )
+        };
+        for rule in &cycle.rules {
+            circles.insert(rule.clone(), text.clone());
+        }
+    }
     for (name, body) in &ast.rules {
         if lexing.is_token(name) {
             continue;
         }
         let mut lines: Vec<String> = Vec::new();
-        if empty.rules.contains_key(name) {
+        if let Some(text) = circles.get(name) {
+            lines.push(text.clone());
+        } else if empty.rules.contains_key(name) {
             lines.push(if start == Some(name.as_str()) {
-                "matches nothing, which is legal only for the start rule — and this is that rule"
-                    .to_owned()
+                "matches nothing, which a rule may: it reduces to a zero-width node".to_owned()
             } else {
-                "can match nothing: an empty alternative is accepted only for the start rule"
-                    .to_owned()
+                "can match nothing: it reduces to a zero-width node wherever it is used".to_owned()
             });
         }
         let productions = precedence::productions(body);
@@ -131,9 +154,11 @@ fn notes(ast: &GrammarAst) -> Notes {
     if !ast.externals.is_empty() {
         notes.section(
             "externals",
-            &["these tokens come from `src/scanner.c`: `grammar.json` stores only their names, \
+            &[
+                "these tokens come from `src/scanner.c`: `grammar.json` stores only their names, \
               not their patterns"
-                .to_owned()],
+                    .to_owned(),
+            ],
         );
     }
 
@@ -299,7 +324,10 @@ mod tests {
     #[test]
     fn formatted_output_is_the_same_before_and_after() {
         let annotated = annotate(GRAMMAR).expect("annotates").text;
-        assert_eq!(emit::fmt(GRAMMAR).expect("fmt").text, emit::fmt(&annotated).expect("fmt").text);
+        assert_eq!(
+            emit::fmt(GRAMMAR).expect("fmt").text,
+            emit::fmt(&annotated).expect("fmt").text
+        );
     }
 
     #[test]
@@ -313,30 +341,47 @@ mod tests {
     fn notes_name_the_priority_order_and_the_dead_token() {
         let text = annotate(GRAMMAR).expect("annotates").text;
         assert!(text.contains("// nothing produces this token"), "{text}");
-        assert!(text.contains("// declared lexical rules: 3 of the grammar's tokens"), "{text}");
+        assert!(
+            text.contains("// declared lexical rules: 3 of the grammar's tokens"),
+            "{text}"
+        );
     }
 
     #[test]
     fn notes_say_where_a_precedence_level_lands() {
         let text = annotate(GRAMMAR).expect("annotates").text;
-        assert!(text.contains("level `mul` (left) marks 1 of 4 alternatives"), "{text}");
-        assert!(text.contains("level `add` (left) marks 2 of 4 alternatives"), "{text}");
+        assert!(
+            text.contains("level `mul` (left) marks 1 of 4 alternatives"),
+            "{text}"
+        );
+        assert!(
+            text.contains("level `add` (left) marks 2 of 4 alternatives"),
+            "{text}"
+        );
         assert!(text.contains("// `mul` (left) = '*' '/'"), "{text}");
     }
 
     #[test]
-    fn notes_say_which_rule_may_match_nothing() {
-        // Annotating does not compile, so the note has to say which of the two
-        // cases an empty alternative is — the legal start rule, or the one the
-        // compiler rejects — without waiting for the diagnostic.
+    fn notes_say_which_rule_may_match_nothing_and_which_circle_is_refused() {
+        // Annotating does not compile, so a note has to say which of the two
+        // cases an empty production is — the legal one, or the circle the
+        // compiler refuses — without waiting for the diagnostic.
         let source = "%name n;\nroot: middle?;\nmiddle: 'b' | ();\n";
         let text = annotate(source).expect("annotates").text;
-        let mut lines = text.lines();
-        assert!(lines.any(|line| line.contains("this is that rule")), "{text}");
         assert!(
-            text.contains("// can match nothing: an empty alternative is accepted only for the start rule"),
+            text.contains(
+                "// can match nothing: it reduces to a zero-width node wherever it is used"
+            ),
             "{text}"
         );
+        let text = annotate("%name n;\nroot: a;\na: a?;\n")
+            .expect("annotates")
+            .text;
+        assert!(
+            text.contains("// matches nothing and reaches itself"),
+            "{text}"
+        );
+        assert!(text.contains("the compiler refuses this"), "{text}");
     }
 
     #[test]
@@ -350,7 +395,9 @@ mod tests {
 
     #[test]
     fn a_grammar_with_nothing_to_say_gets_no_comments() {
-        let text = annotate("%name tiny;\nroot: 'a';\n").expect("annotates").text;
+        let text = annotate("%name tiny;\nroot: 'a';\n")
+            .expect("annotates")
+            .text;
         assert!(!text.contains("//"), "{text}");
     }
 }

@@ -23,14 +23,8 @@ pub enum FlattenGrammarError {
     NoReservedWordSet(Box<str>),
     #[error("Reserved word set count {0} exceeds the maximum of {max}", max = u16::MAX)]
     TooManyReservedWordSets(usize),
-    #[error(
-        "The rule `{0}` matches the empty string.
-
-Tree-sitter does not support syntactic rules that match the empty string
-unless they are used only as the grammar's start rule.
-"
-    )]
-    EmptyString(Box<str>),
+    #[error("{0}")]
+    EpsilonCycle(Box<str>),
     #[error("Rule `{0}` cannot be inlined because it contains a reference to itself")]
     RecursiveInline(Box<str>),
     #[error("Rule `{0}` has no reachable productions.")]
@@ -338,35 +332,23 @@ pub(super) fn flatten_grammar(
     check(g, meta, out)
 }
 
-/// Post-flatten checks. No empty productions used in variables, and no recursive inlines.
+/// Post-flatten checks: no rule may reach itself without consuming input, and no
+/// recursive inlines.
 fn check(
     g: &InputGrammar,
     meta: &ExtractedGrammarMeta,
     out: &ProductionStore,
 ) -> FlattenGrammarResult<()> {
-    // Which variables appear in some production, by index. A step naming a non-terminal
-    // that has no variable (as in some hand-built test grammars) uses none of them.
-    let mut used = vec![false; out.var_prods.len()];
-    for step in &out.steps {
-        if let Some(index) = step.symbol().non_terminal_index()
-            && let Some(slot) = used.get_mut(usize::from(index))
-        {
-            *slot = true;
-        }
-    }
+    check_epsilon_cycles(g, out)?;
     for (i, &(p_start, p_end)) in out.var_prods.iter().enumerate() {
         let symbol = Symbol::non_terminal(i);
-        let inlined = meta.inline.contains(&symbol);
+        if !meta.inline.contains(&symbol) {
+            continue;
+        }
         for p in &out.productions[p_start as usize..p_end as usize] {
-            if used[i] && p.steps_len == 0 && !p.requires_eof_lookahead {
-                Err(FlattenGrammarError::EmptyString(
-                    g.pool.resolve(g.variables[i].name).to_string().into(),
-                ))?;
-            }
-            if inlined
-                && out.steps[p.step_range()]
-                    .iter()
-                    .any(|s| s.symbol() == symbol)
+            if out.steps[p.step_range()]
+                .iter()
+                .any(|s| s.symbol() == symbol)
             {
                 Err(FlattenGrammarError::RecursiveInline(
                     g.pool.resolve(g.variables[i].name).to_string().into(),
@@ -375,6 +357,165 @@ fn check(
         }
     }
     Ok(())
+}
+
+/// Reject the one thing an empty rule cannot be allowed to do: depend on another
+/// empty rule that depends back.
+///
+/// A rule that matches nothing is a reduction with no children, which the parse
+/// table handles — the start rule has always been able to do it, and now every
+/// rule can.  What no table can handle is a *circle* of them: `a: b?; b: ();`
+/// reduces `b`, then `a`, then asks for `b` again at the same position, forever.
+/// The runtime would spin without consuming input, so this is the failure mode
+/// that must be caught here rather than diagnosed later.
+///
+/// `nullable[i]` means variable `i` has a production all of whose steps can
+/// match nothing.  `i` can then hand over to `j` — an edge `i -> j` — when one
+/// of its productions contains `j` and every *other* step of that production is
+/// nullable too, because that is a path from `i` to `j` that consumes nothing.
+/// A cycle among those edges is an empty cycle.
+fn check_epsilon_cycles(g: &InputGrammar, out: &ProductionStore) -> FlattenGrammarResult<()> {
+    let count = out.var_prods.len();
+    let mut nullable = vec![false; count];
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for (i, &(p_start, p_end)) in out.var_prods.iter().enumerate() {
+            if nullable[i] {
+                continue;
+            }
+            let can_be_empty = out.productions[p_start as usize..p_end as usize]
+                .iter()
+                .any(|p| {
+                    !p.requires_eof_lookahead
+                        && out.steps[p.step_range()].iter().all(|step| {
+                        step.symbol()
+                            .non_terminal_index()
+                            .and_then(|j| nullable.get(usize::from(j)))
+                            .copied()
+                            .unwrap_or(false)
+                    })
+                });
+            if can_be_empty {
+                nullable[i] = true;
+                changed = true;
+            }
+        }
+    }
+
+    // Only a nullable variable can hand over to another without consuming.
+    let mut edges: Vec<Vec<usize>> = vec![Vec::new(); count];
+    for (i, &(p_start, p_end)) in out.var_prods.iter().enumerate() {
+        if !nullable[i] {
+            continue;
+        }
+        for p in &out.productions[p_start as usize..p_end as usize] {
+            if p.requires_eof_lookahead {
+                continue;
+            }
+            let steps = &out.steps[p.step_range()];
+            for (at, step) in steps.iter().enumerate() {
+                let Some(j) = step.symbol().non_terminal_index() else {
+                    continue;
+                };
+                let j = usize::from(j);
+                if !nullable.get(j).copied().unwrap_or(false) {
+                    continue;
+                }
+                let rest_is_empty = steps.iter().enumerate().all(|(other, step)| {
+                    other == at
+                        || step
+                            .symbol()
+                            .non_terminal_index()
+                            .and_then(|k| nullable.get(usize::from(k)))
+                            .copied()
+                            .unwrap_or(false)
+                });
+                if rest_is_empty {
+                    edges[i].push(j);
+                }
+            }
+        }
+    }
+
+    // Iterative depth-first search; the grammar can have a thousand variables and
+    // this must not depend on the stack.
+    const WHITE: u8 = 0;
+    const GREY: u8 = 1;
+    const BLACK: u8 = 2;
+    let mut colour = vec![WHITE; count];
+    let mut path: Vec<(usize, usize)> = Vec::new();
+    for root in 0..count {
+        if colour[root] != WHITE || !nullable[root] {
+            continue;
+        }
+        colour[root] = GREY;
+        path.push((root, 0));
+        while let Some(&mut (node, ref mut next)) = path.last_mut() {
+            let Some(&to) = edges[node].get(*next) else {
+                colour[node] = BLACK;
+                path.pop();
+                continue;
+            };
+            *next += 1;
+            match colour[to] {
+                WHITE => {
+                    colour[to] = GREY;
+                    path.push((to, 0));
+                }
+                GREY => {
+                    let start = path.iter().position(|(v, _)| *v == to).unwrap();
+                    let mut names: Vec<&str> = path[start..]
+                        .iter()
+                        .map(|(v, _)| g.pool.resolve(g.variables[*v].name))
+                        .collect();
+                    names.sort_unstable();
+                    names.dedup();
+                    Err(FlattenGrammarError::EpsilonCycle(epsilon_cycle_message(
+                        &names,
+                    )))?;
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The text of [`FlattenGrammarError::EpsilonCycle`].
+///
+/// One rule and several rules fail for the same reason but read badly in a
+/// single sentence: `Rule \`a\` can each match the empty string through one
+/// another` says nothing. The names arrive sorted and deduplicated.
+fn epsilon_cycle_message(names: &[&str]) -> Box<str> {
+    let list = names
+        .iter()
+        .map(|name| format!("`{name}`"))
+        .collect::<Vec<_>>();
+    let Some((last, rest)) = list.split_last() else {
+        return Box::from("a rule matches the empty string in a circle");
+    };
+    let text = if rest.is_empty() {
+        format!(
+            "Rule {last} can match the empty string and reach itself without consuming a\n\
+             token.\n\
+             \n\
+             That reduction consumes no input, so the parser would repeat it at the same\n\
+             position, forever. Break the cycle: make it consume a token, or remove the\n\
+             empty alternative."
+        )
+    } else {
+        format!(
+            "Rules {} and {last} can each match the empty string only by going through the\n\
+             others.\n\
+             \n\
+             Those rules therefore reduce in a circle that consumes no input, and the parser\n\
+             would reduce forever at the same position. Break the cycle: make one of them\n\
+             consume a token, or remove one of the empty alternatives.",
+            rest.join(", ")
+        )
+    };
+    text.into_boxed_str()
 }
 
 pub(super) fn assemble_syntax_grammar(
@@ -690,11 +831,15 @@ mod tests {
         );
     }
 
+    /// A rule used in the middle of another rule may match nothing: `a` is one
+    /// step of nothing and then a token, which the table reduces once and then
+    /// shifts past.
     #[test]
     fn test_flatten_grammar_with_empty_production() {
-        // Empty production in used variable (`a` refs `b`, `b` is empty)
         let mut pool = RulePool::default();
-        let a_root = non_term(&mut pool, 1);
+        let inner = non_term(&mut pool, 1);
+        let tail = term(&mut pool, 2);
+        let a_root = pool.seq(&[inner, tail]);
         let b_root = pool.blank();
         let (a, b) = (pool.intern("a"), pool.intern("b"));
         let pg = InputGrammar {
@@ -715,10 +860,105 @@ mod tests {
             kinds: vec![VariableType::Named, VariableType::Named],
             ..Default::default()
         };
+        let (grammar, interner) = run(pg, meta).expect("an empty rule in sequence is legal");
         assert_eq!(
-            run(pg, meta).unwrap_err(),
-            FlattenGrammarError::EmptyString("b".to_string().into())
+            prods(&grammar, 1, &interner),
+            vec![ProdView {
+                dyn_prec: 0,
+                steps: vec![],
+            }]
         );
+    }
+
+    #[test]
+    fn test_flatten_grammar_with_empty_production_cycle() {
+        // `a: b; b: a | ();` — each can be empty only through the other.
+        let mut pool = RulePool::default();
+        let a_root = non_term(&mut pool, 1);
+        let b_to_a = non_term(&mut pool, 0);
+        let b_blank = pool.blank();
+        let b_root = pool.choice(&[b_to_a, b_blank]);
+        let (a, b) = (pool.intern("a"), pool.intern("b"));
+        let pg = InputGrammar {
+            pool,
+            variables: vec![
+                Variable {
+                    name: a,
+                    root: a_root,
+                },
+                Variable {
+                    name: b,
+                    root: b_root,
+                },
+            ],
+            ..Default::default()
+        };
+        let meta = ExtractedGrammarMeta {
+            kinds: vec![VariableType::Named, VariableType::Named],
+            ..Default::default()
+        };
+        let err = run(pg, meta).unwrap_err();
+        assert_eq!(
+            err,
+            FlattenGrammarError::EpsilonCycle(epsilon_cycle_message(&["a", "b"]))
+        );
+        // One sentence has to name both rules, not say "can each" about one.
+        let text = err.to_string();
+        assert!(text.starts_with("Rules `a` and `b`"), "{text}");
+        assert!(
+            text.contains("reduce forever at the same position"),
+            "{text}"
+        );
+    }
+
+    /// The shape `a: b*; b: ();` reaches the same place through the auxiliary
+    /// variable that `expand_repeats` builds (`aux: choice(seq(aux, aux), b)`),
+    /// so the cycle check has to see through it.
+    #[test]
+    fn test_flatten_grammar_with_repeat_of_an_empty_rule() {
+        let mut pool = RulePool::default();
+        let aux = non_term(&mut pool, 1);
+        let two = pool.seq(&[aux, aux]);
+        let inner = non_term(&mut pool, 2);
+        let aux_root = pool.choice(&[two, inner]);
+        let a_blank = pool.blank();
+        let a_root = pool.choice(&[aux, a_blank]);
+        let b_blank = pool.blank();
+        let (a, aux_name, b) = (pool.intern("a"), pool.intern("a_repeat1"), pool.intern("b"));
+        let pg = InputGrammar {
+            pool,
+            variables: vec![
+                Variable {
+                    name: a,
+                    root: a_root,
+                },
+                Variable {
+                    name: aux_name,
+                    root: aux_root,
+                },
+                Variable {
+                    name: b,
+                    root: b_blank,
+                },
+            ],
+            ..Default::default()
+        };
+        let meta = ExtractedGrammarMeta {
+            kinds: vec![
+                VariableType::Named,
+                VariableType::Auxiliary,
+                VariableType::Named,
+            ],
+            ..Default::default()
+        };
+        let err = run(pg, meta).unwrap_err();
+        assert_eq!(
+            err,
+            FlattenGrammarError::EpsilonCycle(epsilon_cycle_message(&["a_repeat1"]))
+        );
+        let text = err.to_string();
+        assert!(text.starts_with("Rule `a_repeat1` can match"), "{text}");
+        assert!(text.contains("reach itself"), "{text}");
     }
 
     #[test]

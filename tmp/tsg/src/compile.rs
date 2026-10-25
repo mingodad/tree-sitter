@@ -135,9 +135,10 @@ pub fn compile_with(src: &str, options: Options) -> Result<Compiled, Vec<Error>>
     errors.extend(levels.check(&ast));
     levels.apply(&mut ast);
 
-    // A rule that can match nothing is only allowed as the start rule, and the
-    // generator can only name it. Report it here, where the source is.
-    errors.extend(nullability_errors(src, &ast));
+    // A rule that can match nothing is fine — but not a circle of such rules,
+    // which the parser would reduce forever. The generator can only name the
+    // rules; report it here, where the source is.
+    errors.extend(epsilon_cycle_errors(src, &ast));
 
     // Lexicality: what a `tokens { … }` block claims, and what `%word` and
     // `%extra` need the rule to be. Both are generator errors with no position
@@ -403,11 +404,9 @@ pub fn compile_with(src: &str, options: Options) -> Result<Compiled, Vec<Error>>
         None
     } else {
         match ast.name.as_ref().map(|(name, _)| name.as_str()) {
-            Some(name) if is_c_identifier(name) => Some(crate::scanner::source(
-                name,
-                &external_names,
-                &ast.scanners,
-            )),
+            Some(name) if is_c_identifier(name) => {
+                Some(crate::scanner::source(name, &external_names, &ast.scanners))
+            }
             other => {
                 let span = ast
                     .scanners
@@ -689,40 +688,47 @@ fn lexical_errors<'a>(
     (errors, reported)
 }
 
-fn nullability_errors(src: &str, ast: &GrammarAst) -> Vec<Error> {
+/// Refuse only the emptiness that cannot work: a rule that reaches itself
+/// without consuming a token.
+///
+/// Everything else about nullable rules is legal, and deliberately so — a rule
+/// that matches nothing is sometimes the clearest way to say what a construct is
+/// (`statement_list: (statement ';')*;` says "possibly nothing" better than
+/// wrapping it at every use site).
+fn epsilon_cycle_errors(src: &str, ast: &GrammarAst) -> Vec<Error> {
     let nullable = crate::nullable::analyse(ast);
-    let start = ast.start_rule();
-    let mut errors = Vec::new();
-    for (name, _body) in &ast.rules {
-        if Some(name.as_str()) == start {
-            continue;
-        }        let Some(cause) = nullable.rules.get(name) else {
-            continue;
-        };
-        let uses = nullable.references.get(name).map_or(&[][..], Vec::as_slice);
-        if uses.is_empty() {
-            continue;
-        }
-        let (line, col, ..) = crate::lexer::locate(src, uses[0].start);
-        let count = uses.len();
-        let user = if count == 1 {
-            format!("`{name}` is used once, at {line}:{col}")
-        } else {
-            format!("`{name}` is used {count} times, the first at {line}:{col}")
-        };
-        errors.push(
+    crate::nullable::epsilon_cycles(ast, &nullable)
+        .into_iter()
+        .map(|cycle| {
+            let (line, col, ..) = crate::lexer::locate(src, cycle.span.start);
+            if cycle.rules.len() == 1 {
+                let rule = &cycle.rules[0];
+                return Error::new(
+                    cycle.span,
+                    format!("`{rule}` can match nothing and reach itself without consuming a token"),
+                )
+                .with_help(format!(
+                    "the parser would reduce `{rule}` forever at {line}:{col}. Break the circle: \
+                     remove the empty alternative, or make a branch consume a token — a `?` or \
+                     `*` whose content can match nothing does the same thing",
+                ));
+            }
+            let mut names: Vec<String> =
+                cycle.rules.iter().map(|rule| format!("`{rule}`")).collect();
+            let last = names.pop().unwrap_or_default();
             Error::new(
-                *cause,
-                format!("`{name}` can match nothing: this alternative produces no tokens"),
+                cycle.span,
+                format!(
+                    "{} and {last} can each match nothing only through the other",
+                    names.join(", ")
+                ),
             )
             .with_help(format!(
-                "tree-sitter allows that only for the start rule, and {user}; \
-                 write `{name}?` there, or move the emptiness to the use site \
-                 (e.g. `stat*` instead of a `block` rule that wraps it)",
-            )),
-        );
-    }
-    errors
+                "that circle consumes no input, so the parser would reduce forever at {line}:{col}. \
+                 Break it: make one of them consume a token, or remove one of the empty alternatives",
+            ))
+        })
+        .collect()
 }
 
 fn collect_precedence_names<'a>(expr: &'a Expr, out: &mut Vec<(&'a str, Span)>) {
@@ -1480,31 +1486,48 @@ r: field= 'x';
     // ------------------------------ nullability ------------------------------
 
     #[test]
-    fn a_rule_that_can_match_nothing_is_reported_at_the_empty_alternative() {
-        let src = "%name t;\nchunk: block?;\nblock: (stat ';'?)*;\nstat: 'x';\n";
-        let errs = errors(src);
-        assert_eq!(errs.len(), 1, "{errs:?}");
-        assert!(
-            errs[0].msg.contains("`block` can match nothing"),
-            "{}",
-            errs[0].msg
-        );
-        // The caret is on the alternative, not on the rule's name: that is the
-        // part that has to change (or move to the use site).
-        assert_eq!(errs[0].span.start, src.find("(stat").unwrap());
-        let help = errs[0].help.as_deref().unwrap_or_default();
-        assert!(help.contains("`block?`"), "{help}");
-        assert!(help.contains("used once, at 2:"), "{help}");
+    fn a_rule_that_can_match_nothing_is_legal_wherever_it_is_used() {
+        // An empty production is a reduction with no children, which the parse
+        // table handles. Only a *circle* of empty rules is refused (below).
+        assert!(compile("%name t;\nchunk: block?;\nblock: (stat ';'?)*;\nstat: 'x';\n").is_ok());
+        assert!(compile("%name t;\na: 'x' middle 'z';\nmiddle: choice((), 'b');\n").is_ok());
+        // A nullable rule used *by* the start rule is legal too.
+        assert!(compile("%name t;\nchunk: block?;\nblock: 'x'*;\n").is_ok());
     }
 
     #[test]
-    fn the_start_rule_may_be_nullable() {
-        assert!(compile("%name t;\nchunk: ('x' | word)*;\nword: /[a-z]+/;").is_ok());
-        // A nullable rule *used by* the start rule is still refused: the
-        // exemption is for the start rule itself, not for its callees.
-        let errs = errors("%name t;\nchunk: block?;\nblock: 'x'*;");
+    fn a_cycle_of_empty_rules_is_reported_at_the_reference_that_closes_it() {
+        let src = "%name t;\na: b;\nb: a | ();";
+        let errs = errors(src);
         assert_eq!(errs.len(), 1, "{errs:?}");
-        assert!(errs[0].msg.contains("`block`"), "{}", errs[0].msg);
+        assert!(
+            errs[0].msg.contains("`a` and `b` can each match nothing"),
+            "{}",
+            errs[0].msg
+        );
+        // The caret identifies an edge in the reported circle.
+        assert_eq!(errs[0].span.start, src.find("a: b").unwrap() + 3);
+        let help = errs[0].help.as_deref().unwrap_or_default();
+        assert!(help.contains("reduce forever"), "{help}");
+    }
+
+    #[test]
+    fn a_repeat_that_can_match_nothing_is_a_self_cycle() {
+        // `a: a?;` is `a -> a`: the parser would reduce `a` and then ask for it
+        // again at the same position.
+        let src = "%name t;\na: a?;";
+        let errs = errors(src);
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(
+            errs[0]
+                .msg
+                .contains("`a` can match nothing and reach itself"),
+            "{}",
+            errs[0].msg
+        );
+        assert_eq!(errs[0].span.start, src.find("a?").unwrap());
+        // A `?` whose content consumes something is fine.
+        assert!(compile("%name t;\na: ('x')?;\n").is_ok());
     }
 
     #[test]
@@ -1901,7 +1924,9 @@ r: field= 'x';
             file: 'a';
             ");
         assert!(
-            error.msg.contains("`%start` names `missing`, which is not a rule"),
+            error
+                .msg
+                .contains("`%start` names `missing`, which is not a rule"),
             "{}",
             error.msg
         );
@@ -1940,7 +1965,10 @@ r: field= 'x';
         let src = "%name t;\na: (prec.left(1, 'x' 'y') | prec.left(2, 'p' 'q')) | 'w';\n";
         let printed = crate::emit::fmt(src).expect("formattable").text;
         assert!(printed.contains("  | 'w';"), "{printed}");
-        assert!(printed.contains("prec.left(1, 'x' 'y') | prec.left(2, 'p' 'q')"), "{printed}");
+        assert!(
+            printed.contains("prec.left(1, 'x' 'y') | prec.left(2, 'p' 'q')"),
+            "{printed}"
+        );
         assert_eq!(ok(&printed), ok(src), "--fmt must not change the grammar");
     }
 
@@ -2121,22 +2149,19 @@ r: field= 'x';
             source.contains("valid_symbols[action_code] && tsg_scan_delimited(lexer, 0x7B /* { */, 0x7D /* } */)"),
             "{source}"
         );
-        assert_eq!(compiled.externals_without_scanner, vec!["heredoc".to_owned()]);
+        assert_eq!(
+            compiled.externals_without_scanner,
+            vec!["heredoc".to_owned()]
+        );
     }
 
     #[test]
     fn a_scanner_needs_a_name_for_its_c_symbols() {
-        let error = err(
-            r"
+        let error = err(r"
             %external action_code = delimited('{', '}');
             file: action_code;
-            ",
-        );
-        assert!(
-            error.msg.contains("needs a `%name`"),
-            "{}",
-            error.msg
-        );
+            ");
+        assert!(error.msg.contains("needs a `%name`"), "{}", error.msg);
     }
 
     #[test]
@@ -2152,7 +2177,9 @@ r: field= 'x';
         );
         assert_eq!(reported.len(), 1, "{reported:?}");
         assert!(
-            reported[0].msg.contains("skips whitespace before the delimiter"),
+            reported[0]
+                .msg
+                .contains("skips whitespace before the delimiter"),
             "{}",
             reported[0].msg
         );
