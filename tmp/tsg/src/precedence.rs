@@ -18,8 +18,10 @@
 
 use std::collections::HashMap;
 
-use crate::lexer::{Error, Res, Span};
-use crate::parser::{Assoc, Expr, ExprKind, GrammarAst};
+use crate::{
+    lexer::{Error, Res, Span},
+    parser::{Assoc, Expr, ExprKind, GrammarAst},
+};
 
 /// One declared level, in declaration order (highest precedence first).
 pub struct Level {

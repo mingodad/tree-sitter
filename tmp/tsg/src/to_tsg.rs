@@ -11,10 +11,7 @@
 //! so the printer only needs to parenthesise a `CHOICE` or a multi-member `SEQ`
 //! when it appears below the juxtaposition level.
 
-use crate::json::Json;
-use crate::lexer::is_ident_start;
-use crate::parser::is_valid_field_name;
-use crate::rules::CALL_NAMES;
+use crate::{json::Json, lexer::is_ident_start, parser::is_valid_field_name, rules::CALL_NAMES};
 
 const INDENT: &str = "    ";
 const WRAP_WIDTH: usize = 88;

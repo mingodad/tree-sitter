@@ -10,8 +10,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::lexer::Span;
-use crate::parser::{Expr, ExprKind, GrammarAst};
+use crate::{
+    lexer::Span,
+    parser::{Expr, ExprKind, GrammarAst},
+};
 
 /// Rules that can derive nothing, and for each the alternative responsible.
 pub struct Nullable {

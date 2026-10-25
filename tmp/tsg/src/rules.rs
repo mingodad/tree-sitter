@@ -4,8 +4,10 @@
 
 use std::collections::HashSet;
 
-use crate::lexer::{Error, Res, Span};
-use crate::parser::{is_valid_field_name, Expr, ExprKind};
+use crate::{
+    lexer::{Error, Res, Span},
+    parser::{is_valid_field_name, Expr, ExprKind},
+};
 
 #[derive(Clone, Debug)]
 pub enum PrecValue {

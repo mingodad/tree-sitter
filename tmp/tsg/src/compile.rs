@@ -2,13 +2,15 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::json::{json_rule, to_string, Json};
-use crate::lexer::{Error, Span};
-use crate::lexing;
-use crate::parser::{Expr, ExprKind, GrammarAst, Parser};
-use crate::precedence;
-use crate::rules::{Lowerer, Rule};
-use crate::source::Index;
+use crate::{
+    json::{json_rule, to_string, Json},
+    lexer::{Error, Span},
+    lexing,
+    parser::{Expr, ExprKind, GrammarAst, Parser},
+    precedence,
+    rules::{Lowerer, Rule},
+    source::Index,
+};
 
 /// Knobs for compilation.
 #[derive(Debug, Default, Clone, Copy)]

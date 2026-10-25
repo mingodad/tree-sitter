@@ -16,14 +16,14 @@
 //!
 //! * [`lexer::Error`] carries a byte [`lexer::Span`], rendered rustc-style by
 //!   [`lexer::render_errors`];
-//! * [`source::Index`] maps *names* — rule names, directive arguments, pattern
-//!   text — back to spans. `tree-sitter generate` reports conflicts and
-//!   precedence mistakes by name only, because `grammar.json` has no positions;
-//!   this is what turns those messages into carets.
+//! * [`source::Index`] maps *names* — rule names, directive arguments, pattern text — back to
+//!   spans. `tree-sitter generate` reports conflicts and precedence mistakes by name only, because
+//!   `grammar.json` has no positions; this is what turns those messages into carets.
 //!
 //! See `examples/` and `SYNTAX.md` for the language reference.
 
 pub mod compile;
+pub mod diff;
 pub mod json;
 pub mod json_read;
 pub mod lexer;

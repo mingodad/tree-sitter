@@ -1019,3 +1019,42 @@ can also be a rule name belongs in it.
   differently.
 - When editing large generated `.tsg`/docs, use `python3` with `assert old in s`
   before `str.replace` — a silent no-op replace already bit twice.
+
+## Comparing two grammars: `tsg --diff`
+
+`tsg A --diff B` compares grammars, not text.  Both sides may be `.tsg` or
+`grammar.json` (dialect is picked by the file name, `-r` forces JSON for stdin);
+each is lowered to `grammar.json` and the two documents are walked in document
+order.  Comments, indentation and sugar never matter; order that *is* meaning
+(rule order — the start rule — key order, alternative order) is compared, because
+the generator observes it.  Only `conflicts` is sorted first: it is a list of
+sets the generator rewrites.
+
+```
+$ tsg bc/grammar.tsg --diff bison_flex/grammar.tsg
+name:
+  - "bc"
+  + "bison_flex"
+...
+$ tsg postgres16/grammar.tsg --diff src/grammar.json
+no difference: postgres16/grammar.tsg and src/grammar.json are the same grammar
+```
+
+Exit 0 means "same grammar", 1 means "different", 2 means a usage error.  Up to
+20 differences are printed with their path (`rules.BCONST.content.value`), so a
+failure names the rule and the field instead of the line number.
+
+This is what the `.g` gates should compare with instead of `cmp`: `cmp` fails on
+a comment change in `g2tsg` and cannot say which rule drifted.
+
+### Why there is no `tsg fmt` yet
+
+`tsg -r grammar.json` already prints normalized `.tsg` (round-trip is exact for
+all 92 corpus grammars), so the printer exists.  It cannot be `fmt` for a `.tsg`
+source: comments live only in the source text — the JSON path drops them — and
+`postgres16/grammar.tsg` starts with 27 lines of program notes that a formatter
+must not eat.  A formatter therefore has to print from the AST (`parser.rs`
+`Grammar`), not from the lowered JSON, and it must keep the leading comment
+block.  Measured cost of the shortcut: `tsg postgres16/grammar.tsg -o g.json &&
+tsg -r g.json` loses exactly those 27 header lines and 4 390 diff lines overall.
+Until that printer exists, use `--diff` to compare and leave whitespace alone.

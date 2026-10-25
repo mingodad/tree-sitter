@@ -4,8 +4,10 @@
 //! This is a straightforward recursive-descent scanner over bytes with the same
 //! span-based error reporting as the `.tsg` front-end.
 
-use crate::json::Json;
-use crate::lexer::{locate, Error, Res, Span};
+use crate::{
+    json::Json,
+    lexer::{locate, Error, Res, Span},
+};
 
 pub fn parse(src: &str) -> Res<Json> {
     let mut reader = Reader {

@@ -21,8 +21,10 @@
 
 use std::collections::HashSet;
 
-use crate::lexer::Span;
-use crate::parser::{Expr, ExprKind, GrammarAst};
+use crate::{
+    lexer::Span,
+    parser::{Expr, ExprKind, GrammarAst},
+};
 
 /// One rule, in declaration order.
 #[derive(Debug, Clone)]

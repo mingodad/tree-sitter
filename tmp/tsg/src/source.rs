@@ -21,8 +21,10 @@
 
 use std::fmt::Write as _;
 
-use crate::lexer::{locate, Span};
-use crate::parser::{Expr, ExprKind, GrammarAst};
+use crate::{
+    lexer::{locate, Span},
+    parser::{Expr, ExprKind, GrammarAst},
+};
 
 /// One name → span mapping. Kinds are spelled the way they appear in the
 /// source, so a caller can pass them straight through: `"%extra"`,

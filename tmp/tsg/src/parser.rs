@@ -62,13 +62,12 @@ pub enum Assoc {
 /// One `%precedence` directive. Two shapes share it, because `grammar.json`
 /// needs both and `--from-json` has to be able to print both:
 ///
-/// * `%precedence "call" "pow";` — one *ordering*: a list of names and rule
-///   references, comparable with each other and with nothing else. This is the
-///   form `to_tsg` emits, since `precedences` is a list of such lists.
-/// * `%precedence left "add" = '+' '-';` — one *level* in a single table: a
-///   name, its associativity, and the terminals whose productions inherit it.
-///   Consecutive levels are emitted as one ordering, highest first, the way
-///   `%left`/`%right` stack up in yacc.
+/// * `%precedence "call" "pow";` — one *ordering*: a list of names and rule references, comparable
+///   with each other and with nothing else. This is the form `to_tsg` emits, since `precedences` is
+///   a list of such lists.
+/// * `%precedence left "add" = '+' '-';` — one *level* in a single table: a name, its
+///   associativity, and the terminals whose productions inherit it. Consecutive levels are emitted
+///   as one ordering, highest first, the way `%left`/`%right` stack up in yacc.
 #[derive(Debug)]
 pub struct PrecedenceGroup {
     pub assoc: Option<Assoc>,
