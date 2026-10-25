@@ -65,19 +65,85 @@ impl TokenConflictMap {
 
         let n = grammar.variables.len();
         let mut status_matrix = vec![TokenConflictStatus::empty(); n * n];
-        for i in 0..grammar.variables.len() {
-            for j in 0..i {
-                let status = compute_conflict_status(
-                    &mut cursor,
-                    grammar,
-                    &following_chars,
-                    &nfa_state_to_var,
-                    i,
-                    j,
-                );
-                status_matrix[matrix_index(n, i, j)] = status.0;
-                status_matrix[matrix_index(n, j, i)] = status.1;
+        let debug = std::env::var_os("TS_DEBUG_CONFLICTS").is_some();
+        let debug_start = std::time::Instant::now();
+
+        // Every pair of tokens is analyzed independently, so this is the one
+        // part of table generation that parallelizes trivially. It matters:
+        // the work is quadratic in the token count, and grammars for real
+        // languages have hundreds of tokens.
+        let thread_count = std::thread::available_parallelism()
+            .map_or(1, std::num::NonZeroUsize::get)
+            .min(n / 16)
+            .max(1);
+        let mut pair_rows = Vec::with_capacity(n);
+        if thread_count > 1 {
+            let rows = std::thread::scope(|scope| {
+                let handles = (0..thread_count)
+                    .map(|t| {
+                        let first = t * n / thread_count;
+                        let last = (t + 1) * n / thread_count;
+                        let following_chars = &following_chars;
+                        let nfa_state_to_var = &nfa_state_to_var;
+                        scope.spawn(move || {
+                            let mut cursor = NfaCursor::new(&grammar.nfa, Vec::new());
+                            let mut rows = Vec::with_capacity(last - first);
+                            for i in first..last {
+                                let mut row = Vec::with_capacity(i);
+                                for j in 0..i {
+                                    let status = compute_conflict_status(
+                                        &mut cursor,
+                                        grammar,
+                                        &following_chars,
+                                        &nfa_state_to_var,
+                                        i,
+                                        j,
+                                    );
+                                    row.push((j, status));
+                                }
+                                rows.push((i, row));
+                            }
+                            rows
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                handles
+                    .into_iter()
+                    .map(|handle| handle.join().expect("token conflict analysis panicked"))
+                    .collect::<Vec<_>>()
+            });
+            pair_rows.extend(rows.into_iter().flatten());
+            pair_rows.sort_unstable_by_key(|(i, _)| *i);
+        } else {
+            for i in 0..grammar.variables.len() {
+                let mut row = Vec::with_capacity(i);
+                for j in 0..i {
+                    let status = compute_conflict_status(
+                        &mut cursor,
+                        grammar,
+                        &following_chars,
+                        &nfa_state_to_var,
+                        i,
+                        j,
+                    );
+                    row.push((j, status));
+                }
+                pair_rows.push((i, row));
             }
+        }
+        for (i, row) in pair_rows {
+            for (j, (forward, reverse)) in row {
+                status_matrix[matrix_index(n, i, j)] = forward;
+                status_matrix[matrix_index(n, j, i)] = reverse;
+            }
+        }
+        if debug {
+            eprintln!(
+                "conflict matrix: {} tokens, {} threads, {:.2}s",
+                n,
+                thread_count,
+                debug_start.elapsed().as_secs_f64()
+            );
         }
 
         // Precompute per-row bitsets for vectorized check_token_conflicts.
