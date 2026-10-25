@@ -1413,6 +1413,16 @@ impl<'a> ParseTableBuilder<'a> {
             (Precedence::Integer(l), Precedence::None) if l != 0 => l.cmp(&0),
             (Precedence::None, Precedence::Integer(r)) if r != 0 => 0.cmp(&r),
 
+            // A symbol with no declared precedence ranks below a symbol in a
+            // named precedence level, just as it ranks below a nonzero integer
+            // precedence above.  Bison's `%prec` relies on this: a rule marked
+            // `%prec HIGH` beats shifting a token that appears in no precedence
+            // declaration.  Without this arm the two sides compare as equal and
+            // the level's associativity decides, so a `%right` level would shift
+            // instead of reducing.
+            (Precedence::None, Precedence::Name(_)) => Ordering::Less,
+            (Precedence::Name(_), Precedence::None) => Ordering::Greater,
+
             // Named precedences can be compared to other named precedences.
             _ => grammar
                 .precedence_orderings
@@ -1559,7 +1569,42 @@ pub fn build_parse_table<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{grammars::SyntaxVariable, strpool::StrPool};
+    use crate::{
+        grammars::SyntaxVariable,
+        strpool::{StrId, StrPool},
+    };
+
+    #[test]
+    fn test_undeclared_precedence_is_lower_than_a_named_level() {
+        // In Bison, `%prec UMINUS` on a rule compares against the precedence of the token
+        // being shifted; a token declared without a precedence level (`%token SET`) has
+        // precedence 0 and loses to any declared level. So `Precedence::None` must rank
+        // below every named level, not equal to it.
+        let grammar = SyntaxGrammar {
+            precedence_orderings: vec![vec![PrecedenceEntry::Name(StrId::from_raw(1))]],
+            ..SyntaxGrammar::default()
+        };
+        let level = Precedence::Name(StrId::from_raw(1));
+
+        assert_eq!(
+            ParseTableBuilder::compare_precedence(&grammar, Precedence::None, &[], level, &[]),
+            Ordering::Less
+        );
+        assert_eq!(
+            ParseTableBuilder::compare_precedence(&grammar, level, &[], Precedence::None, &[]),
+            Ordering::Greater
+        );
+        assert_eq!(
+            ParseTableBuilder::compare_precedence(
+                &grammar,
+                Precedence::None,
+                &[],
+                Precedence::None,
+                &[]
+            ),
+            Ordering::Equal
+        );
+    }
 
     #[test]
     fn test_auxiliary_context_lookup() {
