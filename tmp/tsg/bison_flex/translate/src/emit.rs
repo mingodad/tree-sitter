@@ -239,10 +239,6 @@ pub fn translate(grammar: &Grammar, options: &Options) -> Result<Translation, St
     let mut unlexable: Vec<String> = Vec::new();
     let mut dead_alternatives = 0;
     let bodies = loop {
-        let (kept, kept_order) = remove_empty_rules(rules, order, &start);
-        rules = kept;
-        order = kept_order;
-
         // An alternative that needed only unlexable tokens is now empty, which
         // would read as an empty production; and a rule left with no
         // alternative at all is unproductive, so mentioning it in another rule
@@ -315,28 +311,15 @@ pub fn translate(grammar: &Grammar, options: &Options) -> Result<Translation, St
             .map(|(_, body)| body.as_str())
     };
 
-    // --- nullability ---------------------------------------------------------
-
-    let nullable = nullable(&rules, &order);
-    let always_empty = lists(&rules, &order, &nullable)?;
-    let rules = lists_rewritten(&rules, &always_empty);
-    let mut rules = distribute_optional(&rules, &order, &nullable, &start)?;
-    // tree-sitter has no empty production, so an alternative that is still
-    // empty after the `?` distribution cannot be written down. Its uses were
-    // made optional by `distribute_optional`, so dropping it here loses
-    // nothing that the rewrite did not already give to the callers.
-    for lhs in rules.keys().cloned().collect::<Vec<_>>() {
-        let kept: Vec<Alt> = rules[&lhs]
-            .iter()
-            .filter(|alt| !alt.atoms.is_empty())
-            .cloned()
-            .collect();
-        if kept.is_empty() {
-            rules.remove(&lhs);
-            order.retain(|name| *name != lhs);
-        } else {
-            rules.insert(lhs, kept);
-        }
+    // An empty production is part of the language, never an encoding problem:
+    // the generator rejects only zero-consumption cycles. Written as EBNF the
+    // empty case needs no `()` and no companion rule, so every nullable rule
+    // takes its natural shape — `(item)*` for a list, `x?` for an optional.
+    let (rules, order) = simplify(rules, order, &start);
+    // Reported after the rewrite: what is left is what the policy did *not*
+    // express, and that is the list worth reading.
+    if std::env::var_os("G2TSG_REPORT").is_some() {
+        report_nullable(&rules, &order, &start);
     }
 
     // --- emit ----------------------------------------------------------------
@@ -514,24 +497,8 @@ pub fn translate(grammar: &Grammar, options: &Options) -> Result<Translation, St
         };
         let mut rendered: Vec<String> = Vec::new();
         for alt in alts {
-            let atoms: Vec<String> = alt
-                .atoms
-                .iter()
-                .map(|atom| {
-                    let name = atom.name();
-                    // A lookahead terminal is its base token.
-                    let name = la_of.get(name).map(String::as_str).unwrap_or(name);
-                    match atom {
-                        Atom::Opt(_) => format!("{name}?"),
-                        Atom::Plain(_) => name.to_string(),
-                    }
-                })
-                .collect();
-            let text = format!(
-                "{}{}",
-                atoms.join(" "),
-                mark(alt, &levels, &level_of, &token_set)?
-            );
+            let body = render_body(&alt.atoms, &la_of);
+            let text = format!("{body}{}", mark(alt, &levels, &level_of, &token_set)?);
             let text = text.trim().to_string();
             // An alternative can become a duplicate of another after the
             // rewrites; tree-sitter would reject the ambiguity.
@@ -584,6 +551,67 @@ fn mark(
         Assoc::Left => format!(" @left(p{number})"),
         Assoc::Right => format!(" @right(p{number})"),
     })
+}
+
+/// A production body as `.tsg` text: its atoms, space separated, with a
+/// repeated group written `(a b | c)*`. An empty body is the blank production,
+/// `()`.
+fn render_choice(alts: &[Alt], la_of: &HashMap<String, String>) -> String {
+    alts.iter()
+        .map(|alt| render_body(&alt.atoms, la_of))
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+fn render_body(atoms: &[Atom], la_of: &HashMap<String, String>) -> String {
+    if atoms.is_empty() {
+        return "()".to_owned();
+    }
+    atoms
+        .iter()
+        .map(|atom| match atom {
+            // A lookahead terminal is its base token.
+            Atom::Opt(name) => format!("{}?", lookahead_name(name, la_of)),
+            Atom::Maybe(items) => match items.as_slice() {
+                [Alt { atoms, prec: None }] if atoms.len() == 1 => {
+                    format!("{}?", render_body(atoms, la_of))
+                }
+                _ => {
+                    let alternatives: Vec<String> = items
+                        .iter()
+                        .map(|alt| render_body(&alt.atoms, la_of))
+                        .collect();
+                    format!("({})?", alternatives.join(" | "))
+                }
+            },
+            // `(x)*` is `x*`: parentheses only earn their place when the group
+            // is more than one atom.
+            Atom::Repeat(items) => match items.as_slice() {
+                [Alt { atoms, prec: None }] if atoms.len() == 1 => {
+                    format!("{}*", render_body(atoms, la_of))
+                }
+                _ => format!("({})*", render_choice(items, la_of)),
+            },
+            Atom::Plus(items) => match items.as_slice() {
+                [Alt { atoms, prec: None }] if atoms.len() == 1 => {
+                    format!("{}+", render_body(atoms, la_of))
+                }
+                _ => format!("({})+", render_choice(items, la_of)),
+            },
+            Atom::Group(items) => format!("({})", render_choice(items, la_of)),
+            Atom::Field(name, atoms) => match atoms.as_slice() {
+                [Atom::Opt(inner)] => format!("{name}= {}?", lookahead_name(inner, la_of)),
+                [one] => format!("{name}= {}", render_body(std::slice::from_ref(one), la_of)),
+                several => format!("{name}= ({})", render_body(several, la_of)),
+            },
+            Atom::Plain(name) => lookahead_name(name, la_of).to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn lookahead_name<'a>(name: &'a str, la_of: &'a HashMap<String, String>) -> &'a str {
+    la_of.get(name).map(String::as_str).unwrap_or(name)
 }
 
 /// Up to three names, then "and N more" — an error message that lists forty
@@ -654,41 +682,21 @@ fn used_symbols(rules: &[Rule]) -> HashSet<&str> {
     used
 }
 
-/// Remove the rules that can only produce the empty string, together with
-/// every reference to them, until none is left.
-fn remove_empty_rules(
-    rules: HashMap<String, Vec<Alt>>,
-    order: Vec<String>,
-    start: &str,
-) -> (HashMap<String, Vec<Alt>>, Vec<String>) {
-    let mut rules = rules;
-    let mut order = order;
-    loop {
-        let empty_only: Vec<String> = order
-            .iter()
-            .filter(|lhs| *lhs != start)
-            // A rule with *no* alternatives is unproductive, not empty; the
-            // `all` of an empty list would say it matches nothing at all.
-            .filter(|lhs| !rules[*lhs].is_empty() && rules[*lhs].iter().all(|alt| alt.is_empty()))
-            .cloned()
-            .collect();
-        if empty_only.is_empty() {
-            return (rules, order);
-        }
-        for lhs in &empty_only {
-            rules.remove(lhs);
-        }
-        order.retain(|lhs| !empty_only.contains(lhs));
-        let gone: HashSet<&str> = empty_only.iter().map(String::as_str).collect();
-        for alts in rules.values_mut() {
-            for alt in alts.iter_mut() {
-                alt.atoms.retain(|atom| {
-                    let name = atom.name();
-                    name.starts_with('\'') || !gone.contains(name)
-                });
-            }
-        }
-    }
+/// Whether an alternative can match nothing: every atom is absent or nullable.
+/// The blank alternative is `()` — no atoms at all — so it is nullable too.
+fn is_nullable_alt(alt: &Alt, nullable: &HashSet<String>) -> bool {
+    alt.atoms.iter().all(|atom| match atom {
+        Atom::Opt(_) => true,
+        Atom::Plain(name) => !name.starts_with('\'') && nullable.contains(name),
+        Atom::Repeat(_) | Atom::Plus(_) => false,
+        Atom::Group(alts) => alts.iter().any(|alt| is_nullable_alt(alt, nullable)),
+        Atom::Maybe(_) => true,
+        Atom::Field(_, atoms) => atoms.iter().all(|atom| match atom {
+            Atom::Opt(_) | Atom::Maybe(_) => true,
+            Atom::Plain(name) => !name.starts_with('\'') && nullable.contains(name),
+            _ => false,
+        }),
+    })
 }
 
 /// Which rules can match the empty string: a least fixed point over the rule
@@ -701,12 +709,9 @@ fn nullable(rules: &HashMap<String, Vec<Alt>>, order: &[String]) -> HashSet<Stri
             if nullable.contains(lhs) {
                 continue;
             }
-            let is_nullable = rules[lhs].iter().any(|alt| {
-                alt.atoms.iter().all(|atom| match atom {
-                    Atom::Opt(_) => true,
-                    Atom::Plain(name) => !name.starts_with('\'') && nullable.contains(name),
-                })
-            });
+            let is_nullable = rules[lhs]
+                .iter()
+                .any(|alt| is_nullable_alt(alt, &nullable));
             if is_nullable {
                 nullable.insert(lhs.clone());
                 changed = true;
@@ -718,188 +723,775 @@ fn nullable(rules: &HashMap<String, Vec<Alt>>, order: &[String]) -> HashSet<Stri
     }
 }
 
-/// A nullable rule that refers to itself is a list. Bison can write the base
-/// case as `%empty`; tree-sitter cannot, so it has to become explicit.
-fn lists(
+/// How often each name is referenced from *other* rules' bodies.
+fn reference_counts(
     rules: &HashMap<String, Vec<Alt>>,
     order: &[String],
-    nullable: &HashSet<String>,
-) -> Result<Vec<String>, String> {
-    let mut found = Vec::new();
-    for lhs in order {
-        if !nullable.contains(lhs) {
-            continue;
-        }
-        let recursive = rules[lhs]
-            .iter()
-            .any(|alt| alt.atoms.iter().any(|atom| atom.name() == lhs));
-        if !recursive {
-            continue;
-        }
-        let mut where_recurses = HashSet::new();
-        for alt in &rules[lhs] {
-            for (index, atom) in alt.atoms.iter().enumerate() {
-                if atom.name() != lhs {
-                    continue;
+) -> HashMap<String, usize> {
+    fn walk(atoms: &[Atom], counts: &mut HashMap<String, usize>) {
+        for atom in atoms {
+            match atom {
+                Atom::Plain(name) | Atom::Opt(name) => *counts.entry(name.clone()).or_default() += 1,
+                Atom::Repeat(alts) | Atom::Maybe(alts) | Atom::Plus(alts) | Atom::Group(alts) => {
+                    for alt in alts {
+                        walk(&alt.atoms, counts);
+                    }
                 }
-                where_recurses.insert(if index == 0 {
-                    0
-                } else if index == alt.atoms.len() - 1 {
-                    2
-                } else {
-                    1
-                });
+                Atom::Field(_, atoms) => walk(atoms, counts),
             }
         }
-        if where_recurses.contains(&1) || where_recurses.len() > 1 {
-            return Err(format!(
-                "`{lhs}` is nullable and refers to itself in the middle of a body, which is not a list"
-            ));
-        }
-        found.push(lhs.clone());
     }
-    Ok(found)
+    let mut counts = HashMap::new();
+    for lhs in order {
+        let mut mine = HashMap::new();
+        for alt in &rules[lhs] {
+            walk(&alt.atoms, &mut mine);
+        }
+        for (name, count) in mine {
+            if name != *lhs {
+                *counts.entry(name).or_default() += count;
+            }
+        }
+    }
+    counts
 }
 
-/// `N : N ',' item | %empty` → `N : N ',' item | ',' item`, and the mirror
-/// image for a rule that recurses on its last symbol: the recursive
-/// alternatives keep a self-reference, and the base case is derived from them
-/// when the source only wrote `%empty`.
-fn lists_rewritten(
-    rules: &HashMap<String, Vec<Alt>>,
-    lists: &[String],
-) -> HashMap<String, Vec<Alt>> {
-    let mut out = rules.clone();
-    for lhs in lists {
-        let alts: Vec<&Alt> = rules[lhs].iter().filter(|alt| !alt.is_empty()).collect();
-        // Which edge the rule recurses on: the first symbol or the last.
-        let leading = alts
-            .iter()
-            .any(|alt| alt.atoms.first().is_some_and(|atom| atom.name() == lhs));
-        let on_edge = |alt: &Alt| {
-            if leading {
-                alt.atoms.first().is_some_and(|atom| atom.name() == lhs)
-            } else {
-                alt.atoms.last().is_some_and(|atom| atom.name() == lhs)
-            }
-        };
-        let rest = |alt: &Alt| {
-            if leading {
-                alt.atoms[1..].to_vec()
-            } else {
-                alt.atoms[..alt.atoms.len() - 1].to_vec()
-            }
-        };
+/// What a rule's body says, once EBNF says it.
+#[derive(Clone, Debug)]
+enum Shape {
+    /// `N : () | N α | α` — zero or more items.
+    Star(Vec<Alt>),
+    /// `N : α | N α` — one or more items.
+    Plus(Vec<Alt>),
+    /// `N : () | P | N I` — an optional base, then any number of items. P can
+    /// be a group (`N : () | a b | c d | N ';'`); 144 of the 160 such rules in
+    /// the playground corpus have exactly one base alternative.
+    BaseList {
+        bases: Vec<Alt>,
+        items: Vec<Alt>,
+        /// The source wrote `()`: `P? (I)*`, not `(P I*)?`, because the source
+        /// allows the items without a base (`semicolon_list ';'` with an empty
+        /// `semicolon_list`).
+        nullable_base: bool,
+        left: bool,
+    },
+    /// `N : () | a b | c` — something or nothing.
+    Optional(Vec<Alt>),
+}
 
-        let recursive: Vec<&Alt> = alts.iter().copied().filter(|alt| on_edge(alt)).collect();
-        let mut base: Vec<Alt> = alts
+impl Shape {
+    /// The body the rule keeps. An optional rule loses its empty alternative
+    /// here: its references, not its body, say `?`.
+    fn kept(&self) -> Vec<Alt> {
+        let atoms = match self {
+            Shape::Star(items) => vec![Atom::Repeat(items.clone())],
+            Shape::Plus(items) => vec![Atom::Plus(items.clone())],
+            Shape::Optional(alts) => return alts.clone(),
+            Shape::BaseList {
+                bases,
+                items,
+                nullable_base,
+                left,
+            } => {
+                let base_atoms = if *nullable_base {
+                    vec![Atom::Maybe(bases.clone())]
+                } else {
+                    match bases.as_slice() {
+                        [Alt { atoms, prec: None }] => atoms.clone(),
+                        _ => vec![Atom::Group(bases.clone())],
+                    }
+                };
+                let item = Atom::Repeat(items.clone());
+                if *left {
+                    base_atoms.into_iter().chain([item]).collect()
+                } else {
+                    [item].into_iter().chain(base_atoms).collect()
+                }
+            }
+        };
+        vec![Alt { atoms, prec: None }]
+    }
+
+    /// The one atom a reference to the rule becomes when the rule is inlined —
+    /// `None` when inlining would need more than one atom, which is the sign
+    /// that the name is doing work and should stay.
+    fn one_atom(&self) -> Option<Atom> {
+        match self {
+            Shape::Star(items) => Some(Atom::Repeat(items.clone())),
+            Shape::Plus(items) => Some(Atom::Plus(items.clone())),
+            Shape::Optional(alts) => Some(Atom::Maybe(alts.clone())),
+            Shape::BaseList { .. } => None,
+        }
+    }
+}
+
+/// Whether a body refers to `name` anywhere, groups included.
+///
+/// A list whose item mentions the rule being defined is not a list. Bison wrote
+/// `if_expression : statement_expression | IF expression THEN if_expression ELSE if_expression`,
+/// and `(IF expression THEN if_expression ELSE)* statement_expression` is the
+/// same language, but it hides the nesting behind an operator that reads as a
+/// flat sequence. Those keep the shape the source gave them.
+fn mentions(atoms: &[Atom], name: &str) -> bool {
+    atoms.iter().any(|atom| match atom {
+        Atom::Plain(found) | Atom::Opt(found) => found == name,
+        Atom::Repeat(alts) | Atom::Maybe(alts) | Atom::Plus(alts) | Atom::Group(alts) => {
+            alts.iter().any(|alt| mentions(&alt.atoms, name))
+        }
+        Atom::Field(_, inner) => mentions(inner, name),
+    })
+}
+
+/// `N`'s body in EBNF, or the reason no repetition says it.
+fn shape_of(lhs: &str, alts: &[Alt], nullable: &HashSet<String>) -> Result<Shape, &'static str> {
+    let empty = alts.iter().any(|alt| alt.atoms.is_empty());
+    let filled: Vec<&Alt> = alts.iter().filter(|alt| !alt.atoms.is_empty()).collect();
+    if filled.is_empty() {
+        return Err("only-empty");
+    }
+    // `%prec` decides how a conflict is resolved, and an empty alternative can
+    // carry one too (`opt_else : %empty %prec IF_WITHOUT_ELSE` is the
+    // dangling-else fix). Folding either kind would move the decision, so a
+    // rule that has any is left exactly as written.
+    if alts.iter().any(|alt| alt.prec.is_some()) {
+        return Err("prec");
+    }
+    // Every shape below that can match nothing spells that with the source's
+    // empty alternative. A rule that matches nothing without one was already
+    // respelled by an earlier round — `(a b)?`, `x*` — and re-reading it would
+    // put the `?` on again.
+    if !empty && nullable.contains(lhs) {
+        return Err("already");
+    }
+
+    let leads = |alt: &Alt| alt.atoms.len() > 1 && alt.atoms[0].name() == lhs;
+    let trails = |alt: &Alt| alt.atoms.len() > 1 && alt.atoms[alt.atoms.len() - 1].name() == lhs;
+    let front: Vec<&Alt> = filled.iter().copied().filter(|a| leads(a) && !trails(a)).collect();
+    let back: Vec<&Alt> = filled.iter().copied().filter(|a| trails(a) && !leads(a)).collect();
+    if !front.is_empty() && !back.is_empty() {
+        return Err("both-edges"); // recurses on both edges: not a list
+    }
+    let plain: Vec<&Alt> = filled.iter().copied().filter(|a| !leads(a) && !trails(a)).collect();
+
+    let mut items: Vec<Alt> = Vec::new();
+    for alt in front.iter().chain(back.iter()) {
+        let rest = if leads(alt) {
+            alt.atoms[1..].to_vec()
+        } else {
+            alt.atoms[..alt.atoms.len() - 1].to_vec()
+        };
+        let item = Alt { atoms: rest, prec: None };
+        if item.atoms.is_empty() || is_nullable_alt(&item, nullable) {
+            return Err("nullable-item"); // a repetition of something that can match nothing
+        }
+        if mentions(&item.atoms, lhs) {
+            return Err("self-mention");
+        }
+        if !items.contains(&item) {
+            items.push(item);
+        }
+    }
+
+    // Every alternative that does not refer to the rule is a base. None of
+    // them is redundant: `P | I | N I` allows `I` alone, which `P I*` does not.
+    let mut bases: Vec<Alt> = Vec::new();
+    for alt in plain {
+        if !bases.contains(alt) {
+            bases.push((*alt).clone());
+        }
+    }
+    // A rule that is exactly its own item is a bare repetition: `I | N I` is
+    // `I+`, `() | I | N I` is `I*`.
+    if bases == items {
+        return Ok(if empty {
+            Shape::Star(items)
+        } else {
+            Shape::Plus(items)
+        });
+    }
+
+    let left = !front.is_empty() || back.is_empty();
+    // Right recursion puts the base last, which reads as a terminator. With
+    // several bases it stops reading as a list and starts reading as a prefix
+    // over a machine: bison's `statement` is `For (…) statement | While (…)
+    // statement | If (…) statement opt_else | …` and is left alone.
+    if !left && bases.len() > 1 && !items.is_empty() {
+        return Err("multi-base-tail");
+    }
+    if items.is_empty() {
+        // One alternative, or several, and no self-reference: a plain rule.
+        if !empty {
+            return Err("plain");
+        }
+        return Ok(Shape::Optional(bases));
+    }
+    match (bases.len(), empty) {
+        (0, true) => Ok(Shape::Star(items)),
+        (0, false) => Ok(Shape::Plus(items)),
+        _ => Ok(Shape::BaseList {
+            bases,
+            items,
+            nullable_base: empty,
+            left,
+        }),
+    }
+}
+
+fn substitute(
+    rules: &mut HashMap<String, Vec<Alt>>,
+    order: &[String],
+    target: &str,
+    replacement: &[Atom],
+) {
+    fn walk(atoms: &mut Vec<Atom>, target: &str, replacement: &[Atom]) {
+        let mut at = 0;
+        while at < atoms.len() {
+            if matches!(&atoms[at], Atom::Plain(name) | Atom::Opt(name) if name == target) {
+                atoms.splice(at..at + 1, replacement.iter().cloned());
+                at += replacement.len();
+                continue;
+            }
+            match &mut atoms[at] {
+                Atom::Repeat(alts) | Atom::Maybe(alts) | Atom::Plus(alts) | Atom::Group(alts) => {
+                    for alt in alts.iter_mut() {
+                        walk(&mut alt.atoms, target, replacement);
+                    }
+                }
+                Atom::Field(_, inner) => walk(inner, target, replacement),
+                _ => {}
+            }
+            at += 1;
+        }
+    }
+    for lhs in order {
+        if lhs == target {
+            continue;
+        }
+        if let Some(alts) = rules.get_mut(lhs) {
+            for alt in alts.iter_mut() {
+                walk(&mut alt.atoms, target, replacement);
+            }
+        }
+    }
+}
+
+/// Make every reference to a kept optional rule say `?`.
+fn optionalise(rules: &mut HashMap<String, Vec<Alt>>, order: &[String], names: &[String]) {
+    for name in names {
+        substitute(rules, order, name, &[Atom::Opt(name.clone())]);
+    }
+}
+
+/// Every rule, written the way EBNF would write it: a list is a repetition, an
+/// optional thing is `?`, and a rule that only ever names one decoration is
+/// inlined at the single place it is used.
+///
+/// The reference count decides the last one. With one reference the name buys
+/// nothing — the token is already a node — so the rule becomes a field on the
+/// optional it labels (`union_name= ID?`). With several references the name is
+/// reused, the rule stops matching nothing, and each reference carries the `?`.
+/// A list keeps its rule either way: `*`/`+` is the truthful operator, and a
+/// reference cannot spell it better.
+///
+/// Shapes that a repetition would misstate are left exactly as the source wrote
+/// them, `()` included, and the report names them by reason.
+fn simplify(
+    mut rules: HashMap<String, Vec<Alt>>,
+    mut order: Vec<String>,
+    start: &str,
+) -> (HashMap<String, Vec<Alt>>, Vec<String>) {
+    for _ in 0..12 {
+        let mut changed = false;
+
+        // A rule whose every alternative is empty is not part of any sentence:
+        // the reference to it is nothing at all, so it goes, and a field that
+        // would be left holding nothing goes with it.
+        let only_empty: Vec<String> = order
             .iter()
-            .copied()
-            .filter(|alt| !on_edge(alt))
+            .filter(|lhs| *lhs != start)
+            .filter(|lhs| {
+                rules[*lhs]
+                    .iter()
+                    .all(|alt| alt.atoms.is_empty() && alt.prec.is_none())
+            })
             .cloned()
             .collect();
-        if base.is_empty() {
-            // No base case at all: the item list is the rest of the recursive
-            // alternative, without the self-reference.
-            base = recursive
-                .iter()
-                .map(|alt| Alt {
-                    atoms: rest(alt),
-                    prec: alt.prec.clone(),
-                })
-                .collect();
+        for name in only_empty {
+            substitute(&mut rules, &order, &name, &[]);
+            rules.remove(&name);
+            order.retain(|other| *other != name);
+            changed = true;
+        }
+        if drop_empty(&mut rules, &order) {
+            changed = true;
         }
 
-        let mut rewritten: Vec<Alt> = recursive
+        let nullable = nullable(&rules, &order);
+        let counts = reference_counts(&rules, &order);
+
+        // A rule whose body is one name, used once, is that name.
+        let passthrough: Vec<String> = order
             .iter()
-            .map(|alt| {
-                let mut atoms = if leading {
-                    vec![Atom::Plain(lhs.clone())]
-                } else {
-                    Vec::new()
-                };
-                atoms.extend(rest(alt));
-                if !leading {
-                    atoms.push(Atom::Plain(lhs.clone()));
-                }
-                Alt {
-                    atoms,
-                    prec: alt.prec.clone(),
-                }
+            .filter(|lhs| *lhs != start && counts.get(*lhs).copied().unwrap_or(0) == 1)
+            .filter(|lhs| {
+                matches!(rules[*lhs].as_slice(),
+                    [Alt { atoms, prec: None }]
+                        if matches!(atoms.as_slice(), [Atom::Plain(n) | Atom::Opt(n)] if n != *lhs))
             })
+            .cloned()
             .collect();
-        rewritten.extend(base);
-        out.insert(lhs.clone(), rewritten);
+        for name in passthrough {
+            let body = rules[&name][0].atoms.clone();
+            substitute(&mut rules, &order, &name, &body);
+            rules.remove(&name);
+            order.retain(|other| *other != name);
+            changed = true;
+        }
+
+        let mut shapes: Vec<(String, Shape, usize)> = Vec::new();
+        for lhs in &order {
+            if let Ok(shape) = shape_of(lhs, &rules[lhs], &nullable) {
+                let refs = counts.get(lhs).copied().unwrap_or(0);
+                shapes.push((lhs.clone(), shape, refs));
+            }
+        }
+
+        // Write every body first, then inline: a shape taken before the
+        // substitutions would otherwise overwrite them.
+        for (lhs, shape, _) in &shapes {
+            let rewritten = shape.kept();
+            let at = rules.get_mut(lhs).expect("shape came from this rule");
+            if *at != rewritten {
+                *at = rewritten;
+                changed = true;
+            }
+        }
+
+        let mut kept_optionals: Vec<String> = Vec::new();
+        for (lhs, shape, refs) in &shapes {
+            let helper = is_factored_helper(lhs) && !matches!(shape, Shape::Optional(_));
+            let inline = lhs != start && (*refs == 1 || helper);
+            if inline {
+                if let Some(atom) = shape.one_atom() {
+                    // A rule that only names a decoration becomes a field.
+                    let replacement = match atom {
+                        Atom::Maybe(alts) if !alts.is_empty() => {
+                            vec![Atom::Field(field_name(lhs), vec![Atom::Maybe(alts)])]
+                        }
+                        atom => vec![atom],
+                    };
+                    substitute(&mut rules, &order, lhs, &replacement);
+                    rules.remove(lhs);
+                    order.retain(|name| name != lhs);
+                    changed = true;
+                    continue;
+                }
+                // A base and its items need more than one atom; the reference
+                // takes them all, which is why this is only done for a helper.
+                if helper {
+                    substitute(&mut rules, &order, lhs, &shape.kept()[0].atoms);
+                    rules.remove(lhs);
+                    order.retain(|name| name != lhs);
+                    changed = true;
+                    continue;
+                }
+            }
+            if matches!(shape, Shape::Optional(_)) {
+                kept_optionals.push(lhs.clone());
+            }
+        }
+
+        // A kept optional no longer matches nothing, so its references say `?`.
+        let kept_optionals: Vec<String> = kept_optionals
+            .into_iter()
+            .filter(|name| counts.get(name).copied().unwrap_or(0) > 0)
+            .collect();
+        if !kept_optionals.is_empty() {
+            optionalise(&mut rules, &order, &kept_optionals);
+            changed = true;
+        }
+
+        if !changed {
+            break;
+        }
     }
-    out
+
+    // Last, the shapes the passes above cannot see: an alternative set that
+    // says the same thing twice because it never factored what the branches
+    // share.
+    for lhs in &order {
+        let alts = std::mem::take(rules.get_mut(lhs).expect("order came from rules"));
+        rules.insert(lhs.clone(), factor(alts));
+    }
+    flatten_groups(&mut rules, &order);
+    (rules, order)
 }
 
-/// Replace empty productions by optionality at the use sites.
-///
-/// Tree-sitter forbids a non-start rule that matches the empty string, so a
-/// nullable rule `N` keeps its body but every reference to it becomes `N?`.
-/// An alternative that is *entirely* optional then has to be spelled out as
-/// its non-empty subsequences: `a? b? c?` → `a b? c? | b c? | c`.
-fn distribute_optional(
-    rules: &HashMap<String, Vec<Alt>>,
-    order: &[String],
-    maybe_empty: &HashSet<String>,
-    start: &str,
-) -> Result<HashMap<String, Vec<Alt>>, String> {
-    let mut rewritten: HashMap<String, Vec<Alt>> = HashMap::new();
-    for lhs in order {
-        let multi = lhs != start;
-        let mut out: Vec<Alt> = Vec::new();
-        for alt in &rules[lhs] {
-            if multi && alt.is_empty() {
-                continue;
-            }
-            let atoms: Vec<Atom> = alt
-                .atoms
-                .iter()
-                .map(|atom| match atom {
-                    Atom::Opt(name) => Atom::Opt(name.clone()),
-                    Atom::Plain(name) => {
-                        if !name.starts_with('\'') && maybe_empty.contains(name) && name != lhs {
-                            Atom::Opt(name.clone())
-                        } else {
-                            Atom::Plain(name.clone())
-                        }
-                    }
-                })
-                .collect();
-            if multi && !atoms.is_empty() && atoms.iter().all(|atom| matches!(atom, Atom::Opt(_))) {
-                for index in 0..atoms.len() {
-                    // The first present symbol is mandatory; the rest stay
-                    // optional, so the subsequences together cover the body.
-                    let mut subsequence = vec![Atom::Plain(atoms[index].name().to_string())];
-                    subsequence.extend(atoms[index + 1..].iter().cloned());
-                    out.push(Alt {
-                        atoms: subsequence,
-                        prec: alt.prec.clone(),
-                    });
-                }
-                continue;
-            }
-            out.push(Alt {
-                atoms,
-                prec: alt.prec.clone(),
-            });
-        }
-        if out.is_empty() {
-            return Err(format!(
-                "`{lhs}` has no alternative left after removing `%empty`"
-            ));
-        }
-        rewritten.insert(lhs.clone(), out);
-    }
+/// Whether a rule is bison's factoring of a list rather than a name in the
+/// language. Bison spells "one or more items" as a rule of its own, `symbols.1`
+/// — `symbols_1` here — because Yacc has no `+`; the rule exists for the parser
+/// generator, and `+` says the same thing wherever it is used.
+fn is_factored_helper(rule: &str) -> bool {
+    rule.ends_with("_1")
+}
 
-    // The rewrite is only sound if no non-start rule is still nullable.
-    let still = nullable(&rewritten, order);
-    for lhs in &still {
-        if lhs != start {
-            return Err(format!("`{lhs}` is still nullable after the rewrite"));
+/// Drop what says nothing: a field left holding nothing, a group whose branches
+/// were all erased. Erasing an always-empty rule can empty its surroundings.
+fn drop_empty(rules: &mut HashMap<String, Vec<Alt>>, order: &[String]) -> bool {
+    fn scrub(atoms: &mut Vec<Atom>) {
+        atoms.retain_mut(|atom| match atom {
+            Atom::Field(_, inner) => {
+                scrub(inner);
+                !inner.is_empty()
+            }
+            Atom::Maybe(alts) => {
+                for alt in alts.iter_mut() {
+                    scrub(&mut alt.atoms);
+                }
+                alts.retain(|alt| !alt.atoms.is_empty());
+                !alts.is_empty()
+            }
+            Atom::Group(alts) => {
+                for alt in alts.iter_mut() {
+                    scrub(&mut alt.atoms);
+                }
+                if alts.iter().any(|alt| alt.atoms.is_empty()) {
+                    let rest: Vec<Alt> = alts.iter().filter(|alt| !alt.atoms.is_empty()).cloned().collect();
+                    if rest.is_empty() {
+                        return false;
+                    }
+                    *atom = Atom::Maybe(rest);
+                }
+                true
+            }
+            Atom::Repeat(alts) | Atom::Plus(alts) => {
+                for alt in alts.iter_mut() {
+                    scrub(&mut alt.atoms);
+                }
+                alts.retain(|alt| !alt.atoms.is_empty());
+                !alts.is_empty()
+            }
+            _ => true,
+        });
+    }
+    let mut changed = false;
+    for lhs in order {
+        let before = rules[lhs].clone();
+        for alt in rules.get_mut(lhs).expect("order came from rules").iter_mut() {
+            scrub(&mut alt.atoms);
+        }
+        if *rules.get(lhs).expect("order came from rules") != before {
+            changed = true;
         }
     }
-    Ok(rewritten)
+    changed
+}
+
+/// Write an alternative set the way it reads: factor what the branches share,
+/// and put `?` where one branch is another branch plus something.
+///
+/// `'(' ')' | '(' C ')' | '(' C ',' ')'` says `'('` and `')'` three times;
+/// `'(' (C ','?)? ')'` says each once. Language-preserving, and no name is
+/// lost. Alternatives carrying `%prec` are ordered and are left alone.
+fn factor(mut alts: Vec<Alt>) -> Vec<Alt> {
+    for alt in alts.iter_mut() {
+        factor_atoms(&mut alt.atoms);
+    }
+    alts = dedupe(alts);
+    for _ in 0..6 {
+        if alts.len() < 2 || alts.iter().any(|alt| alt.prec.is_some()) {
+            break;
+        }
+        let prefix = common_prefix(&alts);
+        let suffix = common_suffix(&alts, prefix);
+        if prefix > 0 || suffix > 0 {
+            return vec![shared(&alts, prefix, suffix)];
+        }
+        if let Some(factored) = subsume(&alts) {
+            return factored;
+        }
+        if let Some(merged) = merge_optional_tail(&alts) {
+            alts = merged;
+            continue;
+        }
+        match partition(&alts) {
+            Some(next) => alts = next,
+            None => break,
+        }
+    }
+    alts
+}
+
+fn factor_atoms(atoms: &mut [Atom]) {
+    for atom in atoms.iter_mut() {
+        match atom {
+            Atom::Repeat(alts) | Atom::Maybe(alts) | Atom::Plus(alts) | Atom::Group(alts) => {
+                *alts = factor(std::mem::take(alts));
+            }
+            Atom::Field(_, inner) => factor_atoms(inner),
+            _ => {}
+        }
+    }
+}
+
+fn dedupe(alts: Vec<Alt>) -> Vec<Alt> {
+    let mut kept: Vec<Alt> = Vec::new();
+    for alt in alts {
+        if !kept.contains(&alt) {
+            kept.push(alt);
+        }
+    }
+    kept
+}
+
+fn common_prefix(alts: &[Alt]) -> usize {
+    let first = &alts[0].atoms;
+    let mut length = 0;
+    'grow: while length < first.len() {
+        for alt in &alts[1..] {
+            if alt.atoms.len() <= length || alt.atoms[length] != first[length] {
+                break 'grow;
+            }
+        }
+        length += 1;
+    }
+    length
+}
+
+fn common_suffix(alts: &[Alt], prefix: usize) -> usize {
+    let first = &alts[0].atoms;
+    let mut length = 0;
+    'grow: while length + prefix < first.len() {
+        let atom = &first[first.len() - 1 - length];
+        for alt in &alts[1..] {
+            if alt.atoms.len() <= prefix + length || alt.atoms[alt.atoms.len() - 1 - length] != *atom {
+                break 'grow;
+            }
+        }
+        length += 1;
+    }
+    length
+}
+
+/// The single alternative that says what all of them said between the shared
+/// prefix and the shared suffix.
+fn shared(alts: &[Alt], prefix: usize, suffix: usize) -> Alt {
+    let rests: Vec<Alt> = alts
+        .iter()
+        .map(|alt| Alt {
+            atoms: alt.atoms[prefix..alt.atoms.len() - suffix].to_vec(),
+            prec: None,
+        })
+        .collect();
+    let mut atoms = alts[0].atoms[..prefix].to_vec();
+    atoms.extend(group_of(rests));
+    atoms.extend_from_slice(&alts[0].atoms[alts[0].atoms.len() - suffix..]);
+    Alt { atoms, prec: None }
+}
+
+/// What an alternative set becomes in the middle of a sequence: nothing when it
+/// can only be nothing, a plain group when it is a choice, `(...)?` when one of
+/// the branches is empty.
+fn group_of(rests: Vec<Alt>) -> Vec<Atom> {
+    let rests = dedupe(rests);
+    let optional = rests.iter().any(|alt| alt.atoms.is_empty());
+    let filled: Vec<Alt> = rests.into_iter().filter(|alt| !alt.atoms.is_empty()).collect();
+    if filled.is_empty() {
+        return Vec::new();
+    }
+    let inner = factor(filled);
+    if optional {
+        return vec![Atom::Maybe(inner)];
+    }
+    match inner.as_slice() {
+        [Alt { atoms, prec: None }] => atoms.clone(),
+        _ => vec![Atom::Group(inner)],
+    }
+}
+
+/// `p | p B` is `p B?`: one branch is another branch plus something. Picking
+/// the shortest branch first gives the widest grouping, so `() | a | a b`
+/// becomes `(a b?)?` in one step.
+fn subsume(alts: &[Alt]) -> Option<Vec<Alt>> {
+    let mut by_length: Vec<usize> = (0..alts.len()).collect();
+    by_length.sort_by_key(|&index| alts[index].atoms.len());
+    for &index in &by_length {
+        let prefix = &alts[index].atoms;
+        let covered: Vec<usize> = (0..alts.len())
+            .filter(|&other| {
+                other != index
+                    && alts[other].atoms.len() > prefix.len()
+                    && alts[other].atoms.starts_with(prefix)
+            })
+            .collect();
+        if covered.is_empty() {
+            continue;
+        }
+        let rests: Vec<Alt> = covered
+            .iter()
+            .map(|&other| Alt {
+                atoms: alts[other].atoms[prefix.len()..].to_vec(),
+                prec: None,
+            })
+            .collect();
+        let mut atoms = prefix.clone();
+        atoms.push(Atom::Maybe(factor(rests)));
+        let mut rest: Vec<Alt> = vec![Alt { atoms, prec: None }];
+        for (other, alt) in alts.iter().enumerate() {
+            if other != index && !covered.contains(&other) {
+                rest.push(alt.clone());
+            }
+        }
+        return Some(factor(rest));
+    }
+    None
+}
+
+/// `X A? | A` is `X? A`: the shorter branch is the longer one's own tail with
+/// its head optional. One atom of head only — `X Y A? | A` says nothing about
+/// `X Y`, so it is not `(X Y)? A`.
+fn merge_optional_tail(alts: &[Alt]) -> Option<Vec<Alt>> {
+    for (index, longer) in alts.iter().enumerate() {
+        let Some(Atom::Maybe(inner)) = longer.atoms.last() else {
+            continue;
+        };
+        let [Alt { atoms: tail, prec: None }] = inner.as_slice() else {
+            continue;
+        };
+        let Some(short) = (0..alts.len())
+            .find(|&other| other != index && alts[other].atoms == *tail) else {
+            continue;
+        };
+        let head = &longer.atoms[..longer.atoms.len() - 1];
+        if head.len() > 1 {
+            continue;
+        }
+        let merged = if head.is_empty() {
+            longer.clone()
+        } else {
+            Alt {
+                atoms: [Atom::Maybe(vec![Alt { atoms: head.to_vec(), prec: None }])]
+                    .into_iter()
+                    .chain(tail.iter().cloned())
+                    .collect(),
+                prec: None,
+            }
+        };
+        let mut out: Vec<Alt> = Vec::new();
+        for (other, alt) in alts.iter().enumerate() {
+            if other == index {
+                out.push(merged.clone());
+            } else if other != short {
+                out.push(alt.clone());
+            }
+        }
+        return Some(factor(out));
+    }
+    None
+}
+
+/// Consecutive branches that begin with the same atom become one branch that
+/// begins with it and then chooses. Consecutive only: alternatives are ordered,
+/// and moving one past another is not the translator's call.
+fn partition(alts: &[Alt]) -> Option<Vec<Alt>> {
+    let mut out: Vec<Alt> = Vec::new();
+    let mut changed = false;
+    let mut at = 0;
+    while at < alts.len() {
+        if alts[at].atoms.is_empty() {
+            out.push(alts[at].clone());
+            at += 1;
+            continue;
+        }
+        let head = alts[at].atoms[0].clone();
+        let mut end = at + 1;
+        while end < alts.len() && !alts[end].atoms.is_empty() && alts[end].atoms[0] == head {
+            end += 1;
+        }
+        if end - at == 1 {
+            out.push(alts[at].clone());
+            at = end;
+            continue;
+        }
+        changed = true;
+        let rests: Vec<Alt> = alts[at..end]
+            .iter()
+            .map(|alt| Alt { atoms: alt.atoms[1..].to_vec(), prec: None })
+            .collect();
+        let mut atoms = vec![head];
+        atoms.extend(group_of(rests));
+        out.push(Alt { atoms, prec: None });
+        at = end;
+    }
+    changed.then_some(out)
+}
+
+/// `(a b) c` says what `a b c` says: a group that kept exactly one branch
+/// needs no parentheses. Factoring produces those, and only those — a real
+/// choice keeps its group.
+fn flatten_groups(rules: &mut HashMap<String, Vec<Alt>>, order: &[String]) {
+    fn walk(atoms: &mut Vec<Atom>) {
+        let mut at = 0;
+        while at < atoms.len() {
+            let single = match &mut atoms[at] {
+                Atom::Group(alts) => {
+                    for alt in alts.iter_mut() {
+                        walk(&mut alt.atoms);
+                    }
+                    match alts.as_slice() {
+                        [Alt { atoms: only, prec: None }] => Some(only.clone()),
+                        _ => None,
+                    }
+                }
+                Atom::Repeat(alts) | Atom::Maybe(alts) | Atom::Plus(alts) => {
+                    for alt in alts.iter_mut() {
+                        walk(&mut alt.atoms);
+                    }
+                    None
+                }
+                Atom::Field(_, inner) => {
+                    walk(inner);
+                    None
+                }
+                _ => None,
+            };
+            match single {
+                Some(only) => {
+                    atoms.splice(at..at + 1, only);
+                }
+                None => at += 1,
+            }
+        }
+    }
+    for lhs in order {
+        for alt in rules.get_mut(lhs).expect("order came from rules").iter_mut() {
+            walk(&mut alt.atoms);
+        }
+    }
+}
+
+/// The field a rule's name becomes when the rule is inlined: `tag_opt` → `tag`.
+fn field_name(rule: &str) -> String {
+    rule.strip_suffix("_opt").unwrap_or(rule).to_owned()
+}
+
+/// What the rewrite did not express, and why. Run with `G2TSG_REPORT=1`.
+fn report_nullable(rules: &HashMap<String, Vec<Alt>>, order: &[String], start: &str) {
+    let nullable = nullable(rules, order);
+    let counts = reference_counts(rules, order);
+    for lhs in order {
+        let blank = rules[lhs].iter().any(|alt| alt.atoms.is_empty());
+        if !blank {
+            continue;
+        }
+        let refs = counts.get(lhs).copied().unwrap_or(0);
+        let reason = match shape_of(lhs, &rules[lhs], &nullable) {
+            Err(reason) => reason,
+            // The shape is one a repetition says, so the `()` is a reshaping
+            // that did not happen: a bug, not a limitation.
+            Ok(_) => "unreached",
+        };
+        let start = if lhs == start { " (the start rule)" } else { "" };
+        eprintln!("REPORT {reason:<16} {lhs} refs={refs}{start}");
+    }
 }

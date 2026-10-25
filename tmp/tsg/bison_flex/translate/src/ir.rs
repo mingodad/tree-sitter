@@ -39,27 +39,35 @@ pub enum Atom {
     Plain(String),
     /// `x?` written in the source (a postfix operator, not a nullable rule).
     Opt(String),
+    /// `(a b | c)*`: zero or more of a group. Only the list rewrite produces
+    /// one; it has no name, so no later pass can confuse it with a rule.
+    Repeat(Vec<Alt>),
+    /// `(a b | c)?`: something or nothing. Only the rewrite produces one.
+    Maybe(Vec<Alt>),
+    /// `(a b | c)+`: one or more of a group, for a list spelled with a base
+    /// case (`N : item | N item`). Only the rewrite produces one.
+    Plus(Vec<Alt>),
+    /// `(a b | c)`: a group with no multiplier, left after folding what the
+    /// alternatives share (`'(' C ')' | '(' C ',' ')'` → `'(' (C ','?)? ')'`).
+    Group(Vec<Alt>),
+    /// `k= element`: a field label the source did not have, used when a rule
+    /// that existed only to name an optional decoration is inlined.
+    Field(String, Vec<Atom>),
 }
 
 impl Atom {
     pub fn name(&self) -> &str {
         match self {
             Self::Plain(name) | Self::Opt(name) => name,
+            Self::Repeat(_) | Self::Maybe(_) | Self::Plus(_) | Self::Group(_) | Self::Field(..) => "",
         }
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Alt {
     pub atoms: Vec<Atom>,
     pub prec: Option<String>,
-}
-
-impl Alt {
-    /// An alternative with no symbols, i.e. `%empty`.
-    pub fn is_empty(&self) -> bool {
-        self.atoms.is_empty()
-    }
 }
 
 #[derive(Clone, Debug)]

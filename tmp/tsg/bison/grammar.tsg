@@ -32,18 +32,14 @@ tokens {
 // The start rule is written first.
 
 input:
-    prologue_declarations? SECTION_MARK grammar epilogue_opt?;
-
-prologue_declarations:
-    prologue_declarations prologue_declaration
-  | prologue_declaration;
+    prologue_declaration* SECTION_MARK rules_or_grammar_declaration+ epilogue= SECTION_MARK?;
 
 prologue_declaration:
     grammar_declaration
   | VERBATIN_CODE
   | "%<flag>"
-  | "%define" variable value?
-  | "%header" string_opt?
+  | "%define" ID value= (ID | STRING | ACTION_CODE)?
+  | "%header" string= STRING?
   | "%error-verbose"
   | "%expect" INT_LITERAL
   | "%expect-rr" INT_LITERAL
@@ -55,7 +51,7 @@ prologue_declaration:
   | "%no-lines"
   | "%nondeterministic-parser"
   | "%output" STRING
-  | "%param" params
+  | "%param" ACTION_CODE+
   | "%pure-parser"
   | "%require" STRING
   | "%skeleton" STRING
@@ -64,29 +60,21 @@ prologue_declaration:
   | "%yacc"
   | ';';
 
-params:
-    params ACTION_CODE
-  | ACTION_CODE;
-
 grammar_declaration:
     symbol_declaration
-  | "%start" symbols_1
-  | code_props_type ACTION_CODE generic_symlist
+  | "%start" symbol+
+  | code_props_type ACTION_CODE generic_symlist_item+
   | "%default-prec"
   | "%no-default-prec"
-  | "%code" ACTION_CODE
-  | "%code" ID ACTION_CODE
-  | "%union" union_name? ACTION_CODE;
+  | "%code" ID? ACTION_CODE
+  | "%union" union_name= ID? ACTION_CODE;
 
 code_props_type:
     "%destructor"
   | "%printer";
 
-union_name:
-    ID;
-
 symbol_declaration:
-    "%nterm" nterm_decls
+    "%nterm" token_decls
   | "%token" token_decls
   | "%type" symbol_decls
   | precedence_declarator token_decls_for_prec;
@@ -97,115 +85,41 @@ precedence_declarator:
   | "%nonassoc"
   | "%precedence";
 
-string_opt:
-    STRING;
-
-tag_opt:
-    TAG;
-
-generic_symlist:
-    generic_symlist_item
-  | generic_symlist generic_symlist_item;
-
 generic_symlist_item:
     symbol
-  | tag;
-
-tag:
-    TAG;
-
-nterm_decls:
-    token_decls;
+  | TAG;
 
 token_decls:
-    token_decl_1
-  | TAG token_decl_1
-  | token_decls TAG token_decl_1;
-
-token_decl_1:
-    token_decl
-  | token_decl_1 token_decl;
+    TAG? token_decl+ (TAG token_decl+)*;
 
 token_decl:
-    id int_opt? alias?;
+    id int_opt? alias= (string_as_id | TSTRING)?;
 
 int_opt:
     INT_LITERAL;
 
-alias:
-    string_as_id
-  | TSTRING;
-
 token_decls_for_prec:
-    token_decl_for_prec_1
-  | TAG token_decl_for_prec_1
-  | token_decls_for_prec TAG token_decl_for_prec_1;
-
-token_decl_for_prec_1:
-    token_decl_for_prec
-  | token_decl_for_prec_1 token_decl_for_prec;
+    TAG? token_decl_for_prec+ (TAG token_decl_for_prec+)*;
 
 token_decl_for_prec:
     id int_opt?
   | string_as_id;
 
 symbol_decls:
-    symbols_1
-  | TAG symbols_1
-  | symbol_decls TAG symbols_1;
-
-symbols_1:
-    symbol
-  | symbols_1 symbol;
-
-grammar:
-    rules_or_grammar_declaration
-  | grammar rules_or_grammar_declaration;
+    TAG? symbol+ (TAG symbol+)*;
 
 rules_or_grammar_declaration:
     rules
   | grammar_declaration ';';
 
 rules:
-    id_colon rhses_1?
-  | id_colon named_ref_opt? ':' rhses_1?
-  | id_colon '|' rhses_1?;
-
-rhses_1:
-    rhses_1 '|' rhs?
-  | rhses_1 ';'
-  | rhs;
+    id_colon (named_ref_opt? ':')? rhs ('|' rhs | ';')*;
 
 rhs:
-    rhs symbol named_ref_opt?
-  | rhs tag_opt? ACTION_CODE named_ref_opt?
-  | rhs "%?{...}"
-  | rhs "%empty"
-  | rhs "%prec" symbol
-  | rhs "%dprec" INT_LITERAL
-  | rhs "%merge" TAG
-  | rhs "%expect" INT_LITERAL
-  | rhs "%expect-rr" INT_LITERAL
-  | symbol named_ref_opt?
-  | tag_opt? ACTION_CODE named_ref_opt?
-  | "%?{...}"
-  | "%empty"
-  | "%prec" symbol
-  | "%dprec" INT_LITERAL
-  | "%merge" TAG
-  | "%expect" INT_LITERAL
-  | "%expect-rr" INT_LITERAL;
+    (symbol named_ref_opt? | tag= TAG? ACTION_CODE named_ref_opt? | "%?{...}" | "%empty" | "%prec" symbol | "%dprec" INT_LITERAL | "%merge" TAG | "%expect" INT_LITERAL | "%expect-rr" INT_LITERAL)*;
 
 named_ref_opt:
     BRACKETED_ID;
-
-variable:
-    ID;
-
-value:
-    ID
-  | STRING
-  | ACTION_CODE;
 
 id:
     ID
@@ -220,6 +134,3 @@ symbol:
 
 string_as_id:
     STRING;
-
-epilogue_opt:
-    SECTION_MARK;

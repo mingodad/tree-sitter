@@ -82,42 +82,74 @@ fn option_caseless_reaches_every_token() {
 }
 
 #[test]
-fn a_nullable_rule_becomes_an_optional_reference() {
-    // tree-sitter forbids `a: %empty;` below the start rule: the empty
-    // alternative goes and every reference to `a` becomes `a?`.
+fn a_nullable_rule_reads_as_an_optional() {
+    // An empty production is part of the language. In EBNF that is `Y?` — no
+    // empty alternative anywhere — and the rule used once becomes a field, so
+    // the use site says both what it is and that it may be absent.
     let text = rules(&source(
         "%token X Y",
         "s : a X ;\na : %empty | Y ;",
         "X X\nY Y",
     ));
-    assert!(text.contains("s:\n    a? X;"), "{text}");
-    // An alternative that is still empty cannot be written down at all.
-    assert!(text.contains("a:\n    Y;"), "{text}");
-    assert!(!text.contains("| ;"), "{text}");
+    assert!(text.contains("s:\n    a= Y? X;"), "{text}");
+    assert!(!text.contains("a:"), "{text}");
+    assert!(!text.contains("()"), "{text}");
 }
 
 #[test]
-fn a_self_recursive_list_gets_an_explicit_base_case() {
-    // `l : l ',' X | %empty` — Bison's base case is the empty string, which
-    // has to become the item without the self-reference.
+fn a_self_recursive_list_is_one_repetition() {
+    // `l : l ',' X | %empty` — `l` is "zero or more items", so it is written
+    // that way: one rule, no empty alternative, and the repetition cannot loop
+    // because each item consumes a token.
     let text = rules(&source(
         "%token X",
         "s : l ;\nl : l ',' X | %empty ;",
         "X X",
     ));
-    assert!(text.contains("l:\n    l ',' X\n  | ',' X;"), "{text}");
+    assert!(text.contains("s:\n    (',' X)*;"), "{text}");
+    assert!(!text.contains("l:"), "the name is used once, so it buys nothing");
 }
 
 #[test]
-fn a_run_of_optionals_is_expanded_into_its_non_empty_subsequences() {
-    // `t: a b;` with both nullable cannot be written as `a? b?` without
-    // making `t` nullable too, so the first present symbol becomes mandatory.
+fn a_list_of_something_that_starts_empty_is_still_one_repetition() {
+    // The item begins with a nullable rule, which used to be refused by the
+    // generator ("Unresolved conflict … `tag_opt`"): `expand_repeats` put a
+    // binary merge next to the items, and reducing that raced the zero-width
+    // reduce of `tag_opt`. Fixed in the generator, so this is one rule too.
+    let text = rules(&source(
+        "%token X T",
+        "s : r ;\nr : r tag_opt X | %empty ;\ntag_opt : %empty | T ;",
+        "X X\nT T",
+    ));
+    // `tag_opt` is used once, so it becomes a field inside the repetition and
+    // the item no longer *starts* with a named rule — only with a `?`.
+    assert!(text.contains("s:\n    (tag= T? X)*;"), "{text}");
+}
+
+#[test]
+fn a_nullable_rule_that_is_not_a_list_is_an_optional_too() {
+    // `e: %empty | E` used in the middle of a body: it says "an E or nothing",
+    // so it is written `E?` — at the one place it is used.
+    let text = rules(&source(
+        "%token X E",
+        "s : e X ;\ne : %empty | E ;",
+        "X X\nE E",
+    ));
+    assert!(text.contains("s:\n    e= E? X;"), "{text}");
+    assert!(!text.contains("e:"), "{text}");
+}
+
+#[test]
+fn a_run_of_nullable_symbols_stays_one_alternative() {
+    // `t: a b;` with both nullable is exactly that; the nullable rules supply
+    // their own empty productions, so `t` needs no subsequence expansion.
     let text = rules(&source(
         "%token X Y Z",
         "s : t X ;\nt : a b ;\na : %empty | X ;\nb : %empty | Y | Z ;",
         "X X\nY Y\nZ Z",
     ));
-    assert!(text.contains("t:\n    a b?\n  | b;"), "{text}");
+    assert!(text.contains("t:\n    a= X? b= (Y | Z)?;"), "{text}");
+    assert!(!text.contains("t:\n    a b?\n  | b;"), "{text}");
 }
 
 #[test]
@@ -259,7 +291,7 @@ fn a_rule_whose_productions_all_needed_an_unlexable_token_does_not_become_empty(
         "s : c ;\na : b ;\nb : LOST ;\nc : A ;",
         "A  A",
     ));
-    assert!(text.contains("s:\n    c;"), "{text}");
+    assert!(text.contains("s:\n    A;"), "{text}");
     assert!(!text.contains("b?"), "{text}");
     assert!(!text.contains("\n    a"), "{text}");
 }
@@ -402,4 +434,149 @@ fn a_state_only_group_is_reported_and_a_state_change_is_reported() {
     );
     // The pattern itself is still usable, so the rule is kept.
     assert_eq!(grammar.lexer.rules, vec![("A".to_string(), "A".to_string())]);
+}
+
+
+// ---- What the rewrite does to a rule ---------------------------------------
+//
+// One policy row per test: the shape the source wrote on the left, the way EBNF
+// would say it on the right. These are cheaper than an end-to-end gate and,
+// unlike a gate, they say which row broke.
+
+/// The rewritten rules of a grammar whose lexer returns every token it names.
+fn policy(declarations: &str, rules: &str, tokens: &[(&str, &str)]) -> String {
+    let lexer: Vec<String> = tokens
+        .iter()
+        .map(|(pattern, token)| format!("{pattern}\t{token}"))
+        .collect();
+    super::tests::rules(&source(declarations, rules, &lexer.join("\n")))
+}
+
+#[test]
+fn a_base_and_its_items_collapse_to_an_optional_base_and_a_star() {
+    // R1, one base alternative: `() | P | N I` is `P? I*`.
+    let text = policy("%token P I", "s : %empty | P | s I ;", &[("P", "P"), ("I", "I")]);
+    assert!(text.contains("s:\n    P? I*;"), "{text}");
+}
+
+#[test]
+fn several_bases_are_a_group_before_the_star() {
+    // R1, several: the base is not one atom, so it keeps a group.
+    let text = policy("%token A B C", "s : A | B | s C ;", &[("A", "A"), ("B", "B"), ("C", "C")]);
+    assert!(text.contains("s:\n    (A | B) C*;"), "{text}");
+}
+
+#[test]
+fn an_empty_alternative_makes_only_the_base_optional() {
+    // bc's `semicolon_list`: `B? (P B?)*`. The `?` is on the base, not on the
+    // whole group: the source allows the items without one.
+    let text = policy(
+        "%token B P",
+        "s : %empty | B | s P | s P B ;",
+        &[("B", "B"), ("P", "P")],
+    );
+    assert!(text.contains("s:\n    B? (P B?)*;"), "{text}");
+}
+
+#[test]
+fn a_branch_that_extends_another_puts_the_rest_under_a_question_mark() {
+    // R2: `A | A B` is `A B?`.
+    let text = policy("%token A B", "s : A | A B ;", &[("A", "A"), ("B", "B")]);
+    assert!(text.contains("s:\n    A B?;"), "{text}");
+}
+
+#[test]
+fn a_rule_that_only_matches_nothing_is_erased() {
+    // R3: a reference to it contributes nothing, and no `()` is left behind.
+    let text = policy(
+        "%token A B",
+        "s : A t B ;\nt : %empty ;\nu : %empty ;",
+        &[("A", "A"), ("B", "B")],
+    );
+    assert!(text.contains("s:\n    A B;"), "{text}");
+    assert!(!text.contains("t:"), "{text}");
+}
+
+#[test]
+fn a_rule_that_names_one_rule_and_is_used_once_is_that_rule() {
+    // R4: the name bought nothing, so the reference speaks for itself.
+    let text = policy(
+        "%token A B",
+        "s : A t ;\nt : B ;",
+        &[("A", "A"), ("B", "B")],
+    );
+    assert!(text.contains("s:\n    A B;"), "{text}");
+    assert!(!text.contains("t:"), "{text}");
+}
+
+#[test]
+fn what_every_branch_shares_is_written_once() {
+    // Carbon's `paren_expression_base`, the shape that made factoring worth
+    // doing: `'(' C ')' | '(' C ',' ')' | '(' ')'` is `'(' (C ','?)? ')'`.
+    let text = policy(
+        "%token C",
+        "s : '(' ')' | '(' C ')' | '(' C ',' ')' ;",
+        &[("C", "C"), ("\",\"", "','")],
+    );
+    assert!(text.contains("s:\n    '(' (C ','?)? ')';"), "{text}");
+}
+
+#[test]
+fn consecutive_branches_that_start_alike_choose_after_it() {
+    let text = policy(
+        "%token A B D",
+        "s : A B | A D ;",
+        &[("A", "A"), ("B", "B"), ("D", "D")],
+    );
+    assert!(text.contains("s:\n    A (B | D);"), "{text}");
+}
+
+#[test]
+fn a_branch_that_is_another_with_an_optional_head_puts_the_head_last() {
+    // xmc's `modality`: `'-' t | '-' | t` is `'-'? t`.
+    let text = policy(
+        "%token A",
+        "s : '-' t | '-' | t ;\nt : A ;",
+        &[("\"-\"", "'-'"), ("A", "A")],
+    );
+    assert!(text.contains("s:\n    '-'? t;"), "{text}");
+}
+
+#[test]
+fn a_repetition_whose_item_nests_the_rule_is_not_a_star() {
+    // Carbon's `if_expression`. The language allows `(IF e THEN s ELSE)* s`,
+    // but that hides the nesting behind an operator that reads as a flat
+    // sequence; factoring says `?` instead, which keeps it visible.
+    let text = policy(
+        "%token K L X Y",
+        "s : K s L s | K s | X | Y ;",
+        &[("K", "K"), ("L", "L"), ("X", "X"), ("Y", "Y")],
+    );
+    assert!(text.contains("s:\n    K s (L s)?\n  | X\n  | Y;"), "{text}");
+    assert!(!text.contains("*;"), "{text}");
+}
+
+#[test]
+fn right_recursion_with_several_bases_is_left_alone() {
+    // bc's `statement`: `(For … | While …)* statement` is the same language
+    // but reads as a prefix over a machine, not as a list.
+    let text = policy(
+        "%token P Q T",
+        "s : P | Q | T s ;",
+        &[("P", "P"), ("Q", "Q"), ("T", "T")],
+    );
+    assert!(text.contains("s:\n    P\n  | Q\n  | T s;"), "{text}");
+}
+
+#[test]
+fn a_prec_on_an_empty_alternative_stops_the_fold() {
+    // bc's `opt_else : %empty %prec IF_WITHOUT_ELSE` is the dangling-else
+    // fix. Folding it into a field would move the decision, so the rule keeps
+    // its blank production and its annotation.
+    let text = policy(
+        "%token A B ELSE\n%left ELSE",
+        "s : A t ;\nt : %empty %prec ELSE | ELSE B ;",
+        &[("A", "A"), ("B", "B"), ("ELSE", "ELSE")],
+    );
+    assert!(text.contains("t:\n    () @left(p1)\n  | ELSE B;"), "{text}");
 }

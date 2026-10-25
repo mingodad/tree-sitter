@@ -9,7 +9,8 @@
 # '}')` and `tsg` generates `src/scanner.c` for it: `actions.y` is the sample
 # that needs those regions (nested braces included).  `<EPILOGUE_ST>` is not
 # translated, and `g2tsg` reports it and the one production it drops.
-# `patch.py` applies the one edit that is left (see its header).
+# `g2tsg` emits the grammar as it is written: Bison's empty alternatives become
+# `()`, so there is no hand edit left to apply.
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/.." && pwd)
@@ -33,10 +34,9 @@ done
 mkdir -p "$work/src" "$work/lib" "$work/cache"
 export XDG_CACHE_HOME="$work/cache"
 
-# 1. Translate, then apply the hand edits.  The committed grammar.tsg must stay
-#    the same grammar as that output: comments and layout are allowed to differ.
+# 1. Translate.  The committed grammar.tsg must stay the same grammar as that
+#    output: comments and layout are allowed to differ.
 "$g2" "$here/bison.g" -o "$work/gen.tsg" --name bison
-python3 "$here/patch.py" "$work/gen.tsg"
 if ! "$tsg" "$here/grammar.tsg" --diff "$work/gen.tsg" >&2; then
     echo "FAIL grammar.tsg is not the same grammar as the new translation $work/gen.tsg" >&2
     exit 1
@@ -61,8 +61,10 @@ JSON
 summary=
 for sample in carbon-lang.y actions.y; do
     name=$(basename "$sample" .y)
+    # `tree-sitter parse` exits non-zero as soon as it meets an ERROR, so its
+    # status must not stop the script: the counts below are the report.
     "$ts" parse --lib-path "$work/lib/bison.dylib" --lang-name bison \
-        "$here/$sample" > "$work/$name.log" 2> "$work/$name.err"
+        "$here/$sample" > "$work/$name.log" 2> "$work/$name.err" || true
     errors=$(grep -c '(ERROR' "$work/$name.log" || true)
     missing=$(grep -c '(MISSING' "$work/$name.log" || true)
     if [ "$errors" != 0 ] || [ "$missing" != 0 ]; then
