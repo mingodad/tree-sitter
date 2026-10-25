@@ -41,6 +41,19 @@ pub fn build_lex_table(
         LexTable::default()
     };
 
+    let debug = std::env::var_os("TS_DEBUG_TIMING").is_some();
+    let mut t0 = std::time::Instant::now();
+    let time = |name: &str, t0: &mut std::time::Instant| {
+        if debug {
+            let now = std::time::Instant::now();
+            eprintln!(
+                "  lex {:26} {:>8.2}s",
+                name,
+                now.duration_since(*t0).as_secs_f64()
+            );
+            *t0 = now;
+        }
+    };
     let mut parse_state_ids_by_token_set = Vec::<(TokenSet, Vec<ParseStateId>)>::new();
     for (i, state) in parse_table.states.iter().enumerate() {
         let tokens = state
@@ -82,6 +95,7 @@ pub fn build_lex_table(
         }
     }
 
+    time("token_sets", &mut t0);
     let mut builder = LexTableBuilder::new(lexical_grammar);
     for (tokens, parse_state_ids) in parse_state_ids_by_token_set {
         let lex_state_id = builder.add_state_for_tokens(&tokens, str_pool);
@@ -90,9 +104,12 @@ pub fn build_lex_table(
         }
     }
 
+    time("add_lex_states", &mut t0);
     let mut main_lex_table = mem::take(&mut builder.table);
     minimize_lex_table(&mut main_lex_table, parse_table);
+    time("minimize_lex_table", &mut t0);
     sort_states(&mut main_lex_table, parse_table);
+    time("sort_states", &mut t0);
 
     let mut large_character_sets = Vec::new();
     for (variable_ix, _variable) in lexical_grammar.variables.iter().enumerate() {
@@ -140,6 +157,12 @@ struct QueueEntry {
 struct LexTableBuilder<'a> {
     lexical_grammar: &'a LexicalGrammar,
     cursor: NfaCursor<'a>,
+    /// For each state of the shared NFA, whether it may be used for the token set that is
+    /// currently being processed. The separator block and the hub are always allowed; a
+    /// token's body is allowed only if that token is valid in the parse states at hand.
+    allowed: Vec<bool>,
+    /// For each token, the states of the shared NFA that belong to it.
+    states_by_token: Vec<Vec<u32>>,
     table: LexTable,
     state_queue: VecDeque<QueueEntry>,
     state_ids_by_nfa_state_set: FxHashMap<(Vec<u32>, bool), LexStateId>,
@@ -147,9 +170,21 @@ struct LexTableBuilder<'a> {
 
 impl<'a> LexTableBuilder<'a> {
     fn new(lexical_grammar: &'a LexicalGrammar) -> Self {
+        let mut states_by_token = vec![Vec::new(); lexical_grammar.variables.len()];
+        let mut allowed = Vec::with_capacity(lexical_grammar.shared_owner.len());
+        for (state_id, &owner) in lexical_grammar.shared_owner.iter().enumerate() {
+            if let Some(states) = states_by_token.get_mut(owner as usize) {
+                states.push(state_id as u32);
+                allowed.push(false);
+            } else {
+                allowed.push(true);
+            }
+        }
         Self {
             lexical_grammar,
-            cursor: NfaCursor::new(&lexical_grammar.nfa, vec![]),
+            cursor: NfaCursor::new(&lexical_grammar.shared_nfa, vec![]),
+            allowed,
+            states_by_token,
             table: LexTable::default(),
             state_queue: VecDeque::new(),
             state_ids_by_nfa_state_set: FxHashMap::default(),
@@ -164,11 +199,24 @@ impl<'a> LexTableBuilder<'a> {
 
     fn add_state_for_tokens(&mut self, tokens: &TokenSet, str_pool: &StrPool) -> LexStateId {
         let mut eof_valid = false;
+        self.allowed
+            .iter_mut()
+            .zip(self.lexical_grammar.shared_owner.iter())
+            .for_each(|(allowed, &owner)| {
+                *allowed = owner == u32::MAX;
+            });
+        for token in tokens.iter() {
+            if let SymbolView::Terminal(index) = token.view() {
+                for &state_id in &self.states_by_token[usize::from(index)] {
+                    self.allowed[state_id as usize] = true;
+                }
+            }
+        }
         let nfa_states = tokens
             .iter()
             .filter_map(|token| match token.view() {
                 SymbolView::Terminal(index) => {
-                    Some(self.lexical_grammar.variables[usize::from(index)].start_state)
+                    Some(self.lexical_grammar.shared_start[usize::from(index)])
                 }
                 SymbolView::End => {
                     eof_valid = true;
@@ -200,19 +248,47 @@ impl<'a> LexTableBuilder<'a> {
             );
         }
 
+        let debug = std::env::var_os("TS_DEBUG_TIMING").is_some();
+        let t0 = std::time::Instant::now();
+        let mut max_nfa_states = 0;
         while let Some(QueueEntry {
             state_id,
             nfa_states,
             eof_valid,
         }) = self.state_queue.pop_front()
         {
+            max_nfa_states = max_nfa_states.max(nfa_states.len());
             self.populate_state(state_id, nfa_states, eof_valid);
+            if debug && self.table.states.len() % 2000 == 0 {
+                eprintln!(
+                    "    lex states {:6} queue {:6} max_nfa {:5} {:.1}s",
+                    self.table.states.len(),
+                    self.state_queue.len(),
+                    max_nfa_states,
+                    t0.elapsed().as_secs_f64()
+                );
+            }
+        }
+        if debug {
+            eprintln!(
+                "  lex state set: tokens {:4} -> states {:6} max_nfa {:5} {:.2}s",
+                tokens.len(),
+                self.table.states.len(),
+                max_nfa_states,
+                t0.elapsed().as_secs_f64()
+            );
         }
         state_id
     }
 
     fn add_state(&mut self, nfa_states: Vec<u32>, eof_valid: bool) -> (LexStateId, bool) {
         self.cursor.reset(nfa_states);
+        if !self.allowed.is_empty() {
+            let allowed = &self.allowed;
+            self.cursor
+                .state_ids
+                .retain(|&state_id| allowed[state_id as usize]);
+        }
         match self
             .state_ids_by_nfa_state_set
             .entry((self.cursor.state_ids.clone(), eof_valid))
@@ -234,7 +310,6 @@ impl<'a> LexTableBuilder<'a> {
 
     fn populate_state(&mut self, state_id: LexStateId, nfa_states: Vec<u32>, eof_valid: bool) {
         self.cursor.force_reset(nfa_states);
-
         // The EOF state is represented as an empty list of NFA states.
         let mut completion = None;
         for (id, prec) in self.cursor.completions() {
