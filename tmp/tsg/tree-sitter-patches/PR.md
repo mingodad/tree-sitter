@@ -242,3 +242,32 @@ onto `master` reproduces the branch tree exactly.
   `--max-states`, but silently changing the table shape is worse than asking.
 
 [postgres16.g]: https://github.com/laurivosandi/grammars/blob/master/postgres/postgres16.g
+
+## `0011` — `"start"`: a grammar can name its start rule
+
+**Before:** the start rule was the first entry of `rules`, so the meaning of a
+grammar depended on JSON key order. That order is invisible in an editor, is
+lost whenever a tool re-sorts the object, and had no way to be written down in a
+`.tsg` or in Bison's `%start`. `tsg` could only restate the convention in prose
+("the first non-token rule is the start rule").
+
+**After:** `"start": "name"` names it. No pipeline change: every later stage
+already takes the start rule to be `variables[0]`, so the key is a *promotion*
+(find the named rule, rotate it to the front) rather than a field threaded
+through `prepare_grammar` and `build_tables`. Two errors, both actionable:
+
+```
+`nope` is the declared start rule, but no rule has that name
+`c` is the declared start rule, but it is a token; a token cannot start a tree
+```
+
+**Compatibility:** absent ⇒ first rule, exactly as before; `deny_unknown_fields`
+(0009) means an older generator rejects the key loudly instead of ignoring it.
+
+**Verification:** 92 corpus grammars still round-trip exactly, 16 e2e grammars
+still build byte-identical, `postgres16`/`antlr`/`sqlite3`/`bison_flex` gates
+green. Hand check on a three-rule grammar: `start=b` warns only that `c` is
+unreachable and puts `b` at the root of `node-types.json`, where `start=a` warns
+about both `b` and `c`.
+
+**Cost:** +34 lines in `parse_grammar.rs`.

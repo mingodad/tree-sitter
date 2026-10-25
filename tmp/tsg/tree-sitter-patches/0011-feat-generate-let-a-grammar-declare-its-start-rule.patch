@@ -1,0 +1,96 @@
+From 025108ccb05d99e2846de22d80115eb8ec5fd108 Mon Sep 17 00:00:00 2001
+From: Domingo Alvarez Duarte <mingo@Domingos-MacBook-Air.local>
+Date: Sun, 25 Oct 2026 16:53:25 +0100
+Subject: [PATCH] feat(generate): let a grammar declare its start rule
+
+The start rule was the first entry of `rules`, so a grammar's meaning depended
+on JSON key order: invisible in an editor, lost the moment a tool re-sorts the
+object, and impossible to state in a .tsg or in Bison's `%start`.
+
+`"start": "name"` now names it.  Every later stage takes the start rule to be
+variables[0], so the key is a promotion rather than a new field threaded through
+prepare_grammar and build_tables: find the named rule, rotate it to the front,
+and nothing downstream changes.
+
+Two failures, both reported instead of guessed at:
+  `nope` is the declared start rule, but no rule has that name
+  `c` is the declared start rule, but it is a token; a token cannot start a tree
+
+Without the key nothing changes, so all 92 corpus grammars and the 16 e2e
+grammars are unaffected (checked: they still round-trip and build byte-identical).
+Verified by hand on a three-rule grammar: start=b makes `c` unreachable (one
+warning) and puts `b` at the root of node-types.json, where start=a would warn
+about both `b` and `c`.
+---
+ crates/generate/src/parse_grammar.rs | 34 +++++++++++++++++++++++++++-
+ 1 file changed, 33 insertions(+), 1 deletion(-)
+
+diff --git a/crates/generate/src/parse_grammar.rs b/crates/generate/src/parse_grammar.rs
+index 8d5b75f..6a2f603 100644
+--- a/crates/generate/src/parse_grammar.rs
++++ b/crates/generate/src/parse_grammar.rs
+@@ -119,6 +119,15 @@ pub struct GrammarJSON {
+     /// itself cannot, so a file that still says it is generating a partial grammar.
+     #[serde(default)]
+     inherits: Option<Value>,
++    /// The start rule.
++    ///
++    /// Without it the start rule is the first entry of `rules`, which makes the
++    /// meaning of a grammar depend on JSON key order — invisible in every editor
++    /// and lost the moment a tool re-sorts the object.  Naming it here promotes
++    /// that rule to the front of the variable list, which is where every later
++    /// stage looks for the start rule, so nothing downstream changes.
++    #[serde(default)]
++    start: Option<String>,
+ }
+ 
+ pub type ParseGrammarResult<T> = Result<T, ParseGrammarError>;
+@@ -135,6 +144,10 @@ pub enum ParseGrammarError {
+     InvalidReservedWordSet,
+     #[error("Grammar Error: Unexpected rule `{0}` in `token()` call")]
+     UnexpectedRule(Box<str>),
++    #[error("`{0}` is the declared start rule, but no rule has that name")]
++    StartNotFound(Box<str>),
++    #[error("`{0}` is the declared start rule, but it is a token; a token cannot start a tree")]
++    StartIsToken(Box<str>),
+ }
+ 
+ impl From<serde_json::Error> for ParseGrammarError {
+@@ -278,7 +291,7 @@ pub(crate) fn parse_grammar(
+         precedence_orderings.push(ordering);
+     }
+ 
+-    let variables = grammar_json
++    let mut variables = grammar_json
+         .rules
+         .into_iter()
+         .map(|(name, r)| {
+@@ -290,6 +303,25 @@ pub(crate) fn parse_grammar(
+         })
+         .collect::<ParseGrammarResult<Vec<_>>>()?;
+ 
++    if let Some(start) = &grammar_json.start {
++        let name = pool.intern(start);
++        match variables.iter().position(|v| v.name == name) {
++            Some(0) => {}
++            Some(index) => {
++                let start_variable = variables.remove(index);
++                variables.insert(0, start_variable);
++            }
++            None => {
++                return Err(ParseGrammarError::StartNotFound(start.clone().into_boxed_str()));
++            }
++        }
++        // A rule whose body is a pattern is a token, and tree-sitter builds the
++        // lexer for tokens; a tree cannot start at one.
++        if matches!(pool.node(variables[0].root), Rule::String(_)) {
++            return Err(ParseGrammarError::StartIsToken(start.clone().into_boxed_str()));
++        }
++    }
++
+     let reserved_sets = grammar_json
+         .reserved
+         .into_iter()
+-- 
+2.55.0
+
