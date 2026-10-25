@@ -1,0 +1,219 @@
+// A tree-sitter grammar translated from bison.g.
+// Translated by g2tsg from bison.g (read with bison_flex/grammar.tsg).
+
+%name bison;
+
+tokens {
+  STRING: /"([^"\\]|\\.)*"/;
+  TSTRING: /'([^'\\]|\\.)*'/;
+  BRACKETED_ID: /\[[A-Za-z_][A-Za-z0-9_]*\]/;
+  CHAR_LITERAL: /'([^'\\]|\\.)'/;
+  ID: /([A-Za-z_][A-Za-z0-9_]*)/;
+  ID_COLON: /([A-Za-z_][A-Za-z0-9_]* *:)/;
+  TAG: /<([A-Za-z_][A-Za-z0-9_.]*)?>/;
+  INT_LITERAL: /([0-9]+)/;
+  SECTION_MARK: /%%/;
+  ACTION_CODE: /\{[^{}]*\}/;
+  VERBATIN_CODE: /%\{[^\n]*%\}/;
+}
+
+%extra /[ \t\n\r\f]+/;
+%extra /\/\/[^\n\r]*/;
+%extra /\/\*(?s:.)*?\*\//;
+
+// Bison lists precedence lowest first; tsg wants the descending chain.
+// `nonassoc` becomes a level with no associativity (see the notes above).
+
+
+// The first rule outside `tokens` is the start rule.
+
+input:
+    prologue_declarations? SECTION_MARK grammar;
+
+prologue_declarations:
+    prologue_declarations prologue_declaration
+  | prologue_declaration;
+
+prologue_declaration:
+    grammar_declaration
+  | VERBATIN_CODE
+  | "%<flag>"
+  | "%define" variable value?
+  | "%header" string_opt?
+  | "%error-verbose"
+  | "%expect" INT_LITERAL
+  | "%expect-rr" INT_LITERAL
+  | "%file-prefix" STRING
+  | "%glr-parser"
+  | "%initial-action" ACTION_CODE
+  | "%language" STRING
+  | "%name-prefix" STRING
+  | "%no-lines"
+  | "%nondeterministic-parser"
+  | "%output" STRING
+  | "%param" params
+  | "%pure-parser"
+  | "%require" STRING
+  | "%skeleton" STRING
+  | "%token-table"
+  | "%verbose"
+  | "%yacc"
+  | ';';
+
+params:
+    params ACTION_CODE
+  | ACTION_CODE;
+
+grammar_declaration:
+    symbol_declaration
+  | "%start" symbols_1
+  | code_props_type ACTION_CODE generic_symlist
+  | "%default-prec"
+  | "%no-default-prec"
+  | "%code" ACTION_CODE
+  | "%code" ID ACTION_CODE
+  | "%union" union_name? ACTION_CODE;
+
+code_props_type:
+    "%destructor"
+  | "%printer";
+
+union_name:
+    ID;
+
+symbol_declaration:
+    "%nterm" nterm_decls
+  | "%token" token_decls
+  | "%type" symbol_decls
+  | precedence_declarator token_decls_for_prec;
+
+precedence_declarator:
+    "%left"
+  | "%right"
+  | "%nonassoc"
+  | "%precedence";
+
+string_opt:
+    STRING;
+
+tag_opt:
+    TAG;
+
+generic_symlist:
+    generic_symlist_item
+  | generic_symlist generic_symlist_item;
+
+generic_symlist_item:
+    symbol
+  | tag;
+
+tag:
+    TAG;
+
+nterm_decls:
+    token_decls;
+
+token_decls:
+    token_decl_1
+  | TAG token_decl_1
+  | token_decls TAG token_decl_1;
+
+token_decl_1:
+    token_decl
+  | token_decl_1 token_decl;
+
+token_decl:
+    id int_opt? alias?;
+
+int_opt:
+    INT_LITERAL;
+
+alias:
+    string_as_id
+  | TSTRING;
+
+token_decls_for_prec:
+    token_decl_for_prec_1
+  | TAG token_decl_for_prec_1
+  | token_decls_for_prec TAG token_decl_for_prec_1;
+
+token_decl_for_prec_1:
+    token_decl_for_prec
+  | token_decl_for_prec_1 token_decl_for_prec;
+
+token_decl_for_prec:
+    id int_opt?
+  | string_as_id;
+
+symbol_decls:
+    symbols_1
+  | TAG symbols_1
+  | symbol_decls TAG symbols_1;
+
+symbols_1:
+    symbol
+  | symbols_1 symbol;
+
+grammar:
+    rules_or_grammar_declaration
+  | grammar rules_or_grammar_declaration;
+
+rules_or_grammar_declaration:
+    rules
+  | grammar_declaration ';';
+
+rules:
+    id_colon rhses_1?
+  | id_colon named_ref_opt? ':' rhses_1?
+  | id_colon '|' rhses_1?;
+
+rhses_1:
+    rhses_1 '|' rhs?
+  | rhses_1 ';'
+  | rhs;
+
+rhs:
+    rhs symbol named_ref_opt?
+  | rhs tag_opt? ACTION_CODE named_ref_opt?
+  | rhs "%?{...}"
+  | rhs "%empty"
+  | rhs "%prec" symbol
+  | rhs "%dprec" INT_LITERAL
+  | rhs "%merge" TAG
+  | rhs "%expect" INT_LITERAL
+  | rhs "%expect-rr" INT_LITERAL
+  | symbol named_ref_opt?
+  | tag_opt? ACTION_CODE named_ref_opt?
+  | "%?{...}"
+  | "%empty"
+  | "%prec" symbol
+  | "%dprec" INT_LITERAL
+  | "%merge" TAG
+  | "%expect" INT_LITERAL
+  | "%expect-rr" INT_LITERAL;
+
+named_ref_opt:
+    BRACKETED_ID;
+
+variable:
+    ID;
+
+value:
+    ID
+  | STRING
+  | ACTION_CODE;
+
+id:
+    ID
+  | CHAR_LITERAL;
+
+id_colon:
+    ID_COLON;
+
+symbol:
+    id
+  | string_as_id;
+
+string_as_id:
+    STRING;
+

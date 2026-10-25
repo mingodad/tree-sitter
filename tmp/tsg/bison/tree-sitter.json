@@ -1,0 +1,2 @@
+{"grammars": [{"name": "bison", "camelcase": "Bison", "scope": "source.bison", "path": "."}],
+ "metadata": {"version": "0.0.0", "license": "MIT", "description": "GNU Bison grammar language", "links": {}}}

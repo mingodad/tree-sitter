@@ -1098,3 +1098,34 @@ not carry (never silently).  Making it lossless means re-inserting comments by
 span between the items that own them (rules and directives both carry spans);
 that is the next step, and until it exists `--diff`, which ignores comments
 entirely, is the way to compare a reformatted file with its original.
+
+## Gate 9: `bison/check.sh` — a grammar-only `.g`, end to end
+
+`bison.g` is a grammar for the yacc dialect and `carbon-lang.y` is written in that
+dialect, so parsing it is the whole test: translate, generate, build, parse, and
+require zero `ERROR`/`MISSING` nodes.
+
+What the port actually cost — the honest number, since this is what "can we port
+another `.g`" means:
+
+* `bison.g` has **no Flex section**, so `g2tsg` reports *"the lexer never returns
+  STRING, TSTRING, BRACKETED_ID and 7 more; dropped 75 production(s)"* and keeps
+  11 rules.  The token bodies live in `bison/bodies.txt` (12 tokens), and the
+  lexer did not exist anywhere else in the corpus.
+* `bison/patch.py` applies four edits that need judgement: drop `EPILOGUE`
+  (`(?s:.)+` would swallow the file), add comment extras, drop the epilogue rule
+  and its use, and allow a rule that opens with `|` (yacc's empty first
+  alternative) at the use site, because `rhs` cannot be nullable.
+
+Result: 38 `.tsg` rules → 346 generated rules, 2.9 MB `parser.c`, and
+`carbon-lang.y` parses to 4 365 nodes with **0 ERROR / 0 MISSING**.
+
+Two findings recorded, neither a blocker:
+
+* the shadowed-extra warning fires on benign token-boundary states — `` `%?{...}`
+  completes, so the transition on '\t' into an extra is never taken `` — for
+  literal tokens like `%?{...}` and `%<flag>` that are complete before any extra
+  could start.  Worth checking whether the report should ignore states where the
+  token has already ended, or the message should say "harmless here".
+* `bison.g` names a rule `alias`, which collides with the DSL call; `tsg` warns
+  and suggests `$alias`, and the translation needs no change.
