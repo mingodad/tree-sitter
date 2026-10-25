@@ -12,7 +12,7 @@ pub struct CharacterSet {
 }
 
 /// A state in an NFA representing a regular grammar.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NfaState {
     Advance {
         chars: CharacterSet,
@@ -27,6 +27,33 @@ pub enum NfaState {
     },
 }
 
+impl NfaState {
+    /// Clone this state, rewriting the ids of its outgoing edges with `map`.
+    pub fn clone_with_targets(&self, map: impl Fn(u32) -> u32) -> Self {
+        match self {
+            Self::Advance {
+                chars,
+                state_id,
+                is_sep,
+                precedence,
+            } => Self::Advance {
+                chars: chars.clone(),
+                state_id: map(*state_id),
+                is_sep: *is_sep,
+                precedence: *precedence,
+            },
+            Self::Split(left, right) => Self::Split(map(*left), map(*right)),
+            Self::Accept {
+                variable_index,
+                precedence,
+            } => Self::Accept {
+                variable_index: *variable_index,
+                precedence: *precedence,
+            },
+        }
+    }
+}
+
 #[derive(PartialEq, Eq, Default)]
 pub struct Nfa {
     pub states: Vec<NfaState>,
@@ -36,6 +63,9 @@ pub struct Nfa {
 pub struct NfaCursor<'a> {
     pub(crate) state_ids: Vec<u32>,
     nfa: &'a Nfa,
+    /// Generation stamps used to deduplicate the closure worklist, indexed by NFA state id.
+    seen: Vec<u32>,
+    generation: u32,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -502,6 +532,8 @@ impl<'a> NfaCursor<'a> {
         let mut result = Self {
             nfa,
             state_ids: Vec::new(),
+            seen: vec![0; nfa.states.len()],
+            generation: 0,
         };
         result.add_states(&mut states);
         result
@@ -644,32 +676,35 @@ impl<'a> NfaCursor<'a> {
     }
 
     pub fn add_states(&mut self, new_state_ids: &mut Vec<u32>) {
+        // Each state is expanded at most once per call, regardless of how many
+        // paths reach it. Stamping visited states is what makes this linear-ish
+        // in the number of live NFA states: a lex state that holds every token
+        // of a large grammar holds thousands of them, and the previous
+        // "scan the worklist for each child" check was quadratic in that count.
+        self.generation = self.generation.wrapping_add(1);
+        let generation = self.generation;
         let mut i = 0;
         while i < new_state_ids.len() {
             let state_id = new_state_ids[i];
-            let state = &self.nfa.states[state_id as usize];
-            if let NfaState::Split(left, right) = state {
-                let mut has_left = false;
-                let mut has_right = false;
-                for new_state_id in new_state_ids.iter() {
-                    if *new_state_id == *left {
-                        has_left = true;
-                    }
-                    if *new_state_id == *right {
-                        has_right = true;
-                    }
-                }
-                if !has_left {
+            let seen = &mut self.seen[state_id as usize];
+            if *seen == generation {
+                i += 1;
+                continue;
+            }
+            *seen = generation;
+            match &self.nfa.states[state_id as usize] {
+                NfaState::Split(left, right) => {
                     new_state_ids.push(*left);
-                }
-                if !has_right {
                     new_state_ids.push(*right);
                 }
-            } else if let Err(i) = self.state_ids.binary_search(&state_id) {
-                self.state_ids.insert(i, state_id);
+                _ => self.state_ids.push(state_id),
             }
             i += 1;
         }
+        // Sort once at the end rather than keeping the list sorted with an
+        // insertion per state (which memmoves the whole list every time).
+        self.state_ids.sort_unstable();
+        self.state_ids.dedup();
     }
 }
 
