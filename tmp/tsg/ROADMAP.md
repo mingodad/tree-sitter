@@ -40,7 +40,39 @@ no reason related to their language.
 Each item names what to change, the evidence that it matters, and how it is
 accepted.  Sizes are honest: 1 is a day, 5 is a week or more.
 
-### 1. `%fallback` in `g2tsg`  (translator only, ~1 day)
+### Order by payoff per hour
+
+Ranked by (author gymnastics removed × corpus files affected) ÷ session hours,
+with prerequisites as a hard constraint: a step cannot run before the step it
+compiles onto, and no ranking can move it earlier.
+
+| rank | work | effort | payoff | ratio |
+|---|---|---|---|---|
+| 1 | `LEXER.md` **step 0** — `rest_of_file()` | 2 h | completes the region primitive (`delimited` is the balanced middle, `rest_of_file` the tail); `EPILOGUE` becomes expressible, so the bison gate gains a count instead of a "not a balanced region" note. Needs no state, no payload, no engine | ★★★★ |
+| 2 | `LEXER.md` **step 0b** — extras as external extra tokens | ½ day | deletes a silent-wrong-parser class: `{ a } /*x*/ { b }` parses as a **prefix with exit 0** today (`LEXER.md` §1.5). Also the mechanism every later step needs for trivia | ★★★★ |
+| 3 | item **10**, first half — `--report-lex-states` | ½–1 day | answers "why does this token never match" without a debugger; the dog-food runs asked for it three times; unblocks item 11 | ★★★ |
+| 4 | `LEXER.md` **step 1** — block syntax, IR, `--fmt`/`--annotate` | 1 day | no capability by itself. It is the on-ramp, and it pins the surface while renaming is still cheap | ★★ |
+| 5 | `LEXER.md` **step 2** — the regex engine | 2 days | buys an exact oracle (`--stamp` identity) for the riskiest code in item 2; it is also the only honest fix for the remaining half of `HANDOFF.md` gap 11 (a body `tsg` accepts and `regex-syntax` rejects) | ★★ |
+| 6 | `LEXER.md` **step 3** — states, payload, `enter`/`push`/`pop` | 1–2 days | **52/358** corpus files use `<<>` pushdown. The largest single prize, gated behind 4 and 5 | ★★★ |
+| 7 | `LEXER.md` **step 4** — `reject`, `yyless`, `when(…)` | 1 day | **42/358** use `reject()`; `when(…)` is gap 4's trailing context | ★★★ |
+| 8 | `LEXER.md` **step 5** — the translator | 1–2 days | turns the above into corpus progress; mechanical once 6 and 7 exist | ★ |
+| 9 | item **5** sugar — `%nonassoc` note, `%keyword` | < 1 day each | small, and better after the lexer can say what a keyword is | ★ |
+| 10 | `LEXER.md` **step 6** docs, item **4** remainder, items **6**/**7** | ½ day+ | keeps the honest-tool property; no new capability | ★ |
+
+Two things the ranking makes explicit that the section order did not:
+
+- **Steps 0 and 0b are independent of everything else, and both are hours.** An
+afternoon does those two and stops; nothing later is unblocked or blocked by
+them.
+- **Item 1 (`%fallback`) is done** on the translator side (1 970 occurrences in
+the 358-file corpus), so it is not a candidate and its section stays only for
+the record.
+
+Corpus counts are the 358-file `bison_flex` sweep; "gates" are the three
+checked-in grammars (`bison`, `postgres16`, `antlr`). Sections keep the numbers
+they have because `LEXER.md`, `HANDOFF.md` and `INTEGRATION.md` refer to them.
+
+### 1. `%fallback` in `g2tsg`  (translator only, ~1 day) — done
 
 `%fallback IDENT "if" …` means "the keyword string wins when it matches".  That
 is lexical priority, and `.tsg` already encodes it: earlier rules in a `tokens`

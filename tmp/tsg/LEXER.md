@@ -469,7 +469,9 @@ in priority order, the externals they declare, the trivia they inject).
 ## 7. Steps
 
 Each step ends at a gate. Nothing here needs a new dependency, and nothing may be
-built outside `tmp/tsg`.
+built outside `tmp/tsg`. The payoff-per-hour ranking and how these steps
+interleave with the rest of the roadmap is `ROADMAP.md` §"Order by payoff per
+hour"; steps 0 and 0b are deliberately small enough to do alone.
 
 ### Step 0 — `rest_of_file()` (~1 h)
 
