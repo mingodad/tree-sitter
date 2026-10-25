@@ -4,10 +4,12 @@
 # bison.g is a grammar for the yacc dialect; carbon-lang.y is written in that
 # dialect, so parsing it is the end-to-end test of the translation.
 #
-# The lexer comes from bison.g itself; the two tokens that only exist inside a
-# start condition (`<ACTION_CODE_ST>`, `<EPILOGUE_ST>`) cannot be expressed in a
-# stateless tree-sitter lexer, and `g2tsg` reports them and the productions it
-# drops.  `patch.py` applies the one edit that is left (see its header).
+# The lexer comes from bison.g itself.  Its `<ACTION_CODE_ST>` start condition is
+# a balanced region, so `g2tsg` writes `%external ACTION_CODE = delimited('{',
+# '}')` and `tsg` generates `src/scanner.c` for it: `actions.y` is the sample
+# that needs those regions (nested braces included).  `<EPILOGUE_ST>` is not
+# translated, and `g2tsg` reports it and the one production it drops.
+# `patch.py` applies the one edit that is left (see its header).
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/.." && pwd)
@@ -52,19 +54,34 @@ JSON
 (cd "$here" && "$ts" generate "$work/src/grammar.json")
 "$ts" build --output "$work/lib/bison.dylib" "$work"
 
-# 3. Parse the sample: a whole .y file, which is the language bison.g describes.
-name=$(basename "$here/carbon-lang.y" .y)
-"$ts" parse --lib-path "$work/lib/bison.dylib" --lang-name bison \
-    "$here/carbon-lang.y" > "$work/$name.log" 2> "$work/$name.err"
-errors=$(grep -c '(ERROR' "$work/$name.log" || true)
-missing=$(grep -c '(MISSING' "$work/$name.log" || true)
-if [ "$errors" != 0 ] || [ "$missing" != 0 ]; then
-    echo "FAIL $name.y: $errors ERROR, $missing MISSING" >&2
-    grep -n '(ERROR\|(MISSING' "$work/$name.log" | head >&2
+# 3. Parse the samples: whole .y files, which is the language bison.g describes.
+#    `actions.y` is the one that exercises the generated scanner — it has
+#    semantic actions with nested braces, so ACTION_CODE only appears if the
+#    delimited-region token works.
+summary=
+for sample in carbon-lang.y actions.y; do
+    name=$(basename "$sample" .y)
+    "$ts" parse --lib-path "$work/lib/bison.dylib" --lang-name bison \
+        "$here/$sample" > "$work/$name.log" 2> "$work/$name.err"
+    errors=$(grep -c '(ERROR' "$work/$name.log" || true)
+    missing=$(grep -c '(MISSING' "$work/$name.log" || true)
+    if [ "$errors" != 0 ] || [ "$missing" != 0 ]; then
+        echo "FAIL $sample: $errors ERROR, $missing MISSING" >&2
+        grep -n '(ERROR\|(MISSING' "$work/$name.log" | head >&2
+        exit 1
+    fi
+    summary="$summary $sample: $(wc -l < "$work/$name.log" | tr -d ' ') nodes,"
+done
+
+# The scanner has to have been used, not just compiled: an action_code node per
+# `{ … }` is what proves the region token was returned.
+regions=$(grep -c 'ACTION_CODE' "$work/actions.log" || true)
+if [ "$regions" = 0 ]; then
+    echo "FAIL no ACTION_CODE node: the delimited-region scanner did not run" >&2
     exit 1
 fi
 
-printf 'ok   %s rules, %s parser.c bytes, %s: %s nodes, 0 ERROR\n' \
+printf 'ok   %s rules, %s parser.c bytes,%s %s ACTION_CODE nodes, 0 ERROR\n' \
     "$(grep -c 'type' "$work/src/grammar.json" | tr -d ' ')" \
     "$(wc -c < "$work/src/parser.c" | tr -d ' ')" \
-    "$name" "$(wc -l < "$work/$name.log" | tr -d ' ')"
+    "$summary" "$regions"

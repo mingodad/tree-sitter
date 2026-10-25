@@ -30,6 +30,13 @@ pub struct Compiled {
     /// `grammar.json` has no positions, so this is the only way to point at the
     /// `.tsg` text once the JSON exists.
     pub index: Index,
+    /// `scanner.c` for the `%external … = delimited(…)` declarations, if there
+    /// are any. Written next to `grammar.json` by the caller.
+    pub scanner: Option<String>,
+    /// External tokens with no generated scanner, in declaration order. Their C
+    /// has to be hand-written; the caller reports them rather than letting the
+    /// build fail with an undefined symbol.
+    pub externals_without_scanner: Vec<String>,
 }
 
 /// Compile `.tsg` source into a `grammar.json` document.
@@ -353,6 +360,80 @@ pub fn compile_with(src: &str, options: Options) -> Result<Compiled, Vec<Error>>
     }
     warnings.sort_by_key(|err| (err.span.start, err.span.end));
 
+    let external_names: Vec<String> = ast
+        .externals
+        .iter()
+        .filter_map(|expr| match &expr.kind {
+            ExprKind::Symbol(name) => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    let externals_without_scanner = crate::scanner::without_scanner(&external_names, &ast.scanners);
+    let scanner = if ast.scanners.is_empty() {
+        None
+    } else {
+        match ast.name.as_ref().map(|(name, _)| name.as_str()) {
+            Some(name) if is_c_identifier(name) => Some(crate::scanner::source(
+                name,
+                &external_names,
+                &ast.scanners,
+            )),
+            other => {
+                let span = ast
+                    .scanners
+                    .first()
+                    .map_or(Span::new(0, 0), |scanner| scanner.span);
+                let message = match other {
+                    Some(name) => format!(
+                        "the grammar's name `{name}` cannot prefix the scanner's C functions"
+                    ),
+                    None => "a grammar with a generated scanner needs a `%name`".to_owned(),
+                };
+                errors.push(Error::new(span, message).with_help(
+                    "the C symbols are named `tree_sitter_<name>_external_scanner_*`, so the name \
+                     has to be a C identifier and has to match the `name` in tree-sitter.json",
+                ));
+                None
+            }
+        }
+    };
+    if !errors.is_empty() {
+        return Err(errors);
+    }
+
+    // The generated scanner is called before tree-sitter skips extras, and it
+    // cannot call the internal lexer, so it can only skip the extras it can
+    // reproduce from characters. Whitespace is one; a comment is not. Say which
+    // ones are left over instead of letting `{` silently become an error token.
+    if let Some(first) = ast.scanners.first() {
+        let not_skipped: Vec<String> = ast
+            .extras
+            .iter()
+            .filter(|extra| !is_whitespace_extra(extra))
+            .map(describe_extra)
+            .collect();
+        if !not_skipped.is_empty() {
+            warnings.push(
+                Error::new(
+                    first.span,
+                    format!(
+                        "the scanner for `{}` skips whitespace before the delimiter, but not the \
+                         extra{} {}: a region that starts right after one of those is not \
+                         recognised",
+                        first.name,
+                        if not_skipped.len() == 1 { "" } else { "s" },
+                        not_skipped.join(", ")
+                    ),
+                )
+                .with_help(
+                    "the scanner runs before whitespace and comments are skipped; put the opening \
+                     delimiter where only whitespace can precede it, or write `src/scanner.c` \
+                     yourself",
+                ),
+            );
+        }
+    }
+
     Ok(Compiled {
         json: to_string(&document(
             &ast,
@@ -363,7 +444,106 @@ pub fn compile_with(src: &str, options: Options) -> Result<Compiled, Vec<Error>>
         )),
         warnings,
         index,
+        scanner,
+        externals_without_scanner,
     })
+}
+
+fn is_c_identifier(name: &str) -> bool {
+    let mut characters = name.chars();
+    match characters.next() {
+        Some(first) if first.is_ascii_alphabetic() || first == '_' => {}
+        _ => return false,
+    }
+    characters.all(|character| character.is_ascii_alphanumeric() || character == '_')
+}
+
+/// Whether a generated scanner can reproduce this extra with `isspace`.
+///
+/// `[ \t\r\n]+`, `\s*` and `[[:space:]]+` are the shapes it can; everything
+/// else (comments in particular) needs the internal lexer, which a scanner
+/// cannot call. Guessing at a pattern would produce a lexer that is subtly
+/// wrong, so unknown shapes are reported rather than approximated.
+fn is_whitespace_extra(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Pattern { value, .. } => is_whitespace_pattern(value),
+        _ => false,
+    }
+}
+
+fn is_whitespace_pattern(value: &str) -> bool {
+    let mut body = value.trim();
+    // `to_regex` wraps an alternation in parentheses, so the common extra is
+    // `([ \t\r\n]+)`, not `[ \t\r\n]+`.
+    if let Some(inner) = body
+        .strip_prefix('(')
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        if is_balanced(inner) {
+            body = inner.trim();
+        }
+    }
+    let trimmed = body;
+    let body = trimmed
+        .strip_suffix('+')
+        .or_else(|| trimmed.strip_suffix('*'))
+        .unwrap_or(trimmed);
+    if body == "\\s" || body == "[[:space:]]" || body == "\\s+" || body == "\\s*" {
+        return true;
+    }
+    let Some(inner) = body
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+    else {
+        return false;
+    };
+    if inner.starts_with('^') {
+        return false;
+    }
+    let mut characters = inner.chars();
+    while let Some(character) = characters.next() {
+        match character {
+            ' ' | '\t' | '\n' | '\r' | '\u{b}' | '\u{c}' => {}
+            '\\' => match characters.next() {
+                Some('t' | 'n' | 'r' | 'f' | 'v' | 's') => {}
+                // `\x00-\x20` and friends: a range, so not handled here.
+                _ => return false,
+            },
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// For stripping one wrapper `( … )`: only when nothing inside escapes it.
+fn is_balanced(text: &str) -> bool {
+    let mut depth = 0i32;
+    let mut characters = text.chars();
+    while let Some(character) = characters.next() {
+        match character {
+            '\\' => {
+                characters.next();
+            }
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth < 0 {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    depth == 0
+}
+
+fn describe_extra(expr: &Expr) -> String {
+    match &expr.kind {
+        ExprKind::Pattern { value, .. } => format!("/{value}/"),
+        ExprKind::Symbol(name) => format!("`{name}`"),
+        ExprKind::Str(text) => format!("'{text}'"),
+        _ => "one of the `%extra` rules".to_owned(),
+    }
 }
 
 /// Every precedence name passed to `prec` / `prec.left` / `prec.right`, with the
@@ -1757,5 +1937,89 @@ r: field= 'x';
         let rendered = crate::lexer::render_error(src, "g.tsg", &error);
         assert!(rendered.contains("--> g.tsg:2:7"), "{rendered}");
         assert!(rendered.contains("^^^"), "{rendered}");
+    }
+    // --------------------------- generated scanners ---------------------------
+
+    #[test]
+    fn a_delimited_external_generates_a_scanner() {
+        let compiled = compile_with(
+            r"
+            %name bison;
+            %external action_code = delimited('{', '}');
+            %external heredoc;
+            file: action_code heredoc;
+            ",
+            Options::default(),
+        )
+        .expect("compilation should succeed");
+        let source = compiled.scanner.expect("a scanner is generated");
+        assert!(
+            source.contains("enum tsg_external_tokens {\n  action_code = 0,\n  heredoc = 1,\n};"),
+            "{source}"
+        );
+        assert!(
+            source.contains("void *tree_sitter_bison_external_scanner_create(void)"),
+            "{source}"
+        );
+        assert!(
+            source.contains("valid_symbols[action_code] && tsg_scan_delimited(lexer, 0x7B /* { */, 0x7D /* } */)"),
+            "{source}"
+        );
+        assert_eq!(compiled.externals_without_scanner, vec!["heredoc".to_owned()]);
+    }
+
+    #[test]
+    fn a_scanner_needs_a_name_for_its_c_symbols() {
+        let error = err(
+            r"
+            %external action_code = delimited('{', '}');
+            file: action_code;
+            ",
+        );
+        assert!(
+            error.msg.contains("needs a `%name`"),
+            "{}",
+            error.msg
+        );
+    }
+
+    #[test]
+    fn an_extra_the_scanner_cannot_skip_is_reported() {
+        let reported = warnings(
+            r"
+            %name bison;
+            %extra /[ \t\n]+/;
+            %extra /\/\/[^\n]*/;
+            %external action_code = delimited('{', '}');
+            file: action_code;
+            ",
+        );
+        assert_eq!(reported.len(), 1, "{reported:?}");
+        assert!(
+            reported[0].msg.contains("skips whitespace before the delimiter"),
+            "{}",
+            reported[0].msg
+        );
+        // The pattern is quoted the way the author wrote it, escapes and all.
+        assert!(
+            reported[0].msg.contains(r"\/\/[^\n]*"),
+            "{}",
+            reported[0].msg
+        );
+    }
+
+    #[test]
+    fn whitespace_only_extras_are_quiet() {
+        // Both spellings: bare, and wrapped in the parentheses `to_regex` adds.
+        for extra in [r"/[ \t\r\n]+/", r"/([ \t\r\n]+)/", r"/\s+/"] {
+            assert!(
+                warnings(&format!(
+                    "%name bison;\n%extra {extra};\n\
+                     %external action_code = delimited('{{', '}}');\nfile: action_code;\n"
+                ))
+                .is_empty(),
+                "{extra}"
+            );
+        }
     }
 }

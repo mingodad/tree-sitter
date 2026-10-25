@@ -18,7 +18,7 @@ use std::{
     process::ExitCode,
 };
 
-use tsg::{compile, diff, emit, json, json_read, lexer, lexing, precedence, to_tsg};
+use tsg::{compile, diff, emit, json, json_read, lexer, lexing, precedence, scanner, to_tsg};
 
 struct Options {
     input: Option<String>,
@@ -187,6 +187,8 @@ fn main() -> ExitCode {
     }
 
     let reversed = options.reverse || display_name.ends_with(".json");
+    let mut scanner = None;
+    let mut externals_without_scanner: Vec<String> = Vec::new();
     let rendered = if reversed {
         let grammar = match json_read::parse(&source) {
             Ok(grammar) => grammar,
@@ -216,6 +218,8 @@ fn main() -> ExitCode {
                         lexer::render_warnings(&source, &display_name, &compiled.warnings)
                     );
                 }
+                scanner = compiled.scanner;
+                externals_without_scanner = compiled.externals_without_scanner;
                 compiled.json
             }
             Err(errors) => {
@@ -242,7 +246,53 @@ fn main() -> ExitCode {
         }
     }
 
+    for name in &externals_without_scanner {
+        eprintln!(
+            "note: {display_name}: external token `{name}` has no generated scanner, so it will \
+             never match; declare it as `%external {name} = delimited(open, close);` or supply \
+             `src/scanner.c` yourself"
+        );
+    }
+
+    if let Some(source_text) = &scanner {
+        if let Err(message) = write_scanner(&options, source_text) {
+            eprintln!("error: {display_name}: {message}");
+            return ExitCode::FAILURE;
+        }
+    }
+
     ExitCode::SUCCESS
+}
+
+/// Write `scanner.c` beside the `-o` output.
+///
+/// The file is a build artifact of the grammar, so it goes where `parser.c`
+/// goes: `tsg x.tsg -o src/grammar.json` writes `src/scanner.c`. A file that
+/// `tsg` did not write is never overwritten — a hand-written scanner is somebody
+/// else's grammar, and silently replacing it would break it in a way that only
+/// shows up at parse time.
+fn write_scanner(options: &Options, source: &str) -> Result<(), String> {
+    let Some(output) = &options.output else {
+        eprintln!(
+            "note: no `-o`, so `scanner.c` was not written; pass `-o src/grammar.json` to put it \
+             beside `parser.c`"
+        );
+        return Ok(());
+    };
+    let path = std::path::Path::new(output)
+        .parent()
+        .map_or_else(|| std::path::PathBuf::from("scanner.c"), |dir| dir.join("scanner.c"));
+    if path.exists() {
+        let existing = std::fs::read_to_string(&path).unwrap_or_default();
+        if !existing.starts_with(scanner::MARKER) {
+            return Err(format!(
+                "`{}` exists and was not written by tsg; move it aside first if it is yours",
+                path.display()
+            ));
+        }
+    }
+    std::fs::write(&path, source)
+        .map_err(|err| format!("cannot write `{}`: {err}", path.display()))
 }
 
 fn format_grammar(options: &Options, source: &str, display_name: &str) -> ExitCode {

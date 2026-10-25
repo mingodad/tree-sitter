@@ -103,6 +103,29 @@ pub struct TokenRule {
     pub immediate: bool,
 }
 
+/// A scanner tsg can write for an external token: a region that starts with one
+/// character, nests on it, and ends when the matching closing character brings
+/// the depth back to zero.
+///
+/// This exists because tree-sitter's native lexer has no stack — see
+/// `AUTHORING.md` — and a balanced region is the one shape that covers most
+/// grammars that need one (`{ … }` action bodies, `%{ … %}` prologues, `( … )`
+/// groups). The whole region is one token, so the depth never outlives a call:
+/// the scanner carries no state between tokens and cannot break incremental
+/// parsing.
+#[derive(Debug, Clone)]
+pub struct Delimited {
+    /// The external token this scanner recognises; names an entry in
+    /// [`GrammarAst::externals`].
+    pub name: String,
+    /// The character that opens the region.
+    pub open: char,
+    /// The character that closes it, once the depth returns to zero.
+    pub close: char,
+    /// The directive, for diagnostics.
+    pub span: Span,
+}
+
 /// Everything in a `.tsg` file: directives plus ordered rule definitions.
 ///
 /// `rules` is a `Vec`, not a map: rule order is semantic — the first rule is
@@ -121,6 +144,11 @@ pub struct GrammarAst {
     /// `/[\s]/`, exactly as in `dsl.js`.
     pub no_extras: bool,
     pub externals: Vec<Expr>,
+    /// The `= delimited('{', '}')` half of an external declaration. `grammar.json`
+    /// only knows the token names, so this is the part of a scanner tsg can
+    /// generate; hand-written scanners live in `scanner.c` and are not described
+    /// here.
+    pub scanners: Vec<Delimited>,
     pub inline: Vec<(String, Span)>,
     pub supertypes: Vec<(String, Span)>,
     pub conflicts: Vec<(Vec<String>, Span)>,
@@ -189,6 +217,63 @@ impl<'a> Parser<'a> {
             true
         } else {
             false
+        }
+    }
+
+    /// The `= delimited('{', '}')` part of an external declaration.
+    fn parse_delimited(&mut self, name: &str) -> Res<Delimited> {
+        let span = self.cur_span();
+        match self.cur() {
+            Tok::Ident(word) if word == "delimited" => {
+                self.bump();
+            }
+            other => {
+                return Err(Error::new(
+                    span,
+                    format!(
+                        "expected `delimited(…)` after `=` — the only scanner tsg can write — but found {}",
+                        other.describe()
+                    ),
+                ))
+            }
+        }
+        self.expect(Tok::Lparen, "`(`")?;
+        let open = self.parse_delimiter("opening")?;
+        self.expect(Tok::Comma, "`,`")?;
+        let close = self.parse_delimiter("closing")?;
+        self.expect(Tok::Rparen, "`)`")?;
+        Ok(Delimited {
+            name: name.to_owned(),
+            open,
+            close,
+            span,
+        })
+    }
+
+    fn parse_delimiter(&mut self, which: &str) -> Res<char> {
+        let span = self.cur_span();
+        match self.cur().clone() {
+            Tok::Str(text) => {
+                self.bump();
+                let mut characters = text.chars();
+                match (characters.next(), characters.next()) {
+                    (Some(only), None) => Ok(only),
+                    _ => Err(Error::new(
+                        span,
+                        format!(
+                            "the {which} delimiter has to be exactly one character; a multi-character \
+                             delimiter would need lookahead a scanner does not get"
+                        ),
+                    )),
+                }
+            }
+            other => Err(Error::new(
+                span,
+                format!(
+                    "expected the {which} delimiter as a one-character string, but found {}",
+                    other.describe()
+                ),
+            )),
         }
     }
 
@@ -369,9 +454,28 @@ impl<'a> Parser<'a> {
                 grammar.no_extras = true;
             }
             "external" => {
-                let expr = self.parse_expr()?;
-                self.expect_semi()?;
-                grammar.externals.push(expr);
+                // `NAME = delimited(…)` has to be read here, not through `parse_expr`:
+                // inside an expression `name= something` is a field label, so `=` would
+                // be swallowed and reported as "not a token name".
+                let next_is_equals = matches!(
+                    self.tokens.get(self.index + 1).map(|token| &token.tok),
+                    Some(Tok::Eq)
+                );
+                if next_is_equals {
+                    let (name, span) = self.expect_ident("the external token's name")?;
+                    self.expect(Tok::Eq, "`=`")?;
+                    let scanner = self.parse_delimited(&name)?;
+                    self.expect_semi()?;
+                    grammar.externals.push(Expr {
+                        span,
+                        kind: ExprKind::Symbol(name),
+                    });
+                    grammar.scanners.push(scanner);
+                } else {
+                    let expr = self.parse_expr()?;
+                    self.expect_semi()?;
+                    grammar.externals.push(expr);
+                }
             }
             "inline" => {
                 let items = self.parse_ident_list("at least one rule name")?;

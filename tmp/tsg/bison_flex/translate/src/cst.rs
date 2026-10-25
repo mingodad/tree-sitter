@@ -22,7 +22,7 @@ use std::fmt;
 
 use tree_sitter::{Language, Node, Parser, Tree};
 
-use crate::ir::{Alt, Assoc, Atom, Directive, Grammar, Lexer, Rule};
+use crate::ir::{Alt, Assoc, Atom, Directive, Grammar, Lexer, Pushdown, Rule};
 
 /// A parse or input error, with the position it was found at.
 #[derive(Debug)]
@@ -132,7 +132,9 @@ pub fn read(source: &[u8], language: &Language) -> Result<Grammar, InputError> {
 
     lexer.macros = split_macros(&macros)?;
     let mut notes = Vec::new();
-    lexer.rules = split_lexer_rules(&lexer_rules, &mut notes)?;
+    let (lexed, pushdown) = split_lexer_rules(&lexer_rules, &mut notes)?;
+    lexer.rules = lexed;
+    lexer.pushdown = pushdown;
     lexer.notes = notes;
     // `%option caseless` sits with the definitions, not with the rules.
     lexer.caseless = macros
@@ -524,7 +526,7 @@ fn is_caseless_option(line: &str) -> bool {
 fn split_lexer_rules(
     lines: &[String],
     notes: &mut Vec<String>,
-) -> Result<Vec<(String, String)>, InputError> {
+) -> Result<(Vec<(String, String)>, Vec<Pushdown>), InputError> {
     let mut rules = Vec::new();
     let mut index = 0;
     // A `/* … */` block hides every line inside it: real lexers comment rules
@@ -532,6 +534,9 @@ fn split_lexer_rules(
     let mut in_comment = false;
     let mut entries: Vec<String> = Vec::new();
     let mut state_only: Vec<String> = Vec::new();
+    // `<X> { … }` where `X` is not `INITIAL`, kept as a group: one of them may
+    // be a balanced region, which a scanner can express.
+    let mut groups: Vec<(Vec<String>, Vec<String>)> = Vec::new();
     while index < lines.len() {
         let line = lines[index].trim();
         index += 1;
@@ -562,10 +567,11 @@ fn split_lexer_rules(
                     .map(|line| line.trim().to_string())
                     .collect();
                 index += 1;
+                let inner: Vec<String> = inner.into_iter().filter(|line| !line.is_empty()).collect();
                 if states.iter().any(|state| state == "INITIAL") {
-                    entries.extend(inner.into_iter().filter(|line| !line.is_empty()));
+                    entries.extend(inner);
                 } else {
-                    state_only.extend(inner.into_iter().filter(|line| !line.is_empty()));
+                    groups.push((states, inner));
                 }
                 continue;
             }
@@ -575,6 +581,22 @@ fn split_lexer_rules(
 
     let mut state_change = 0;
     let mut unreadable: Vec<String> = Vec::new();
+    // A group that is a balanced region becomes an external token; the rest of
+    // its rules exist only to keep the state, so they have no work left to do.
+    let mut pushdown: Vec<Pushdown> = Vec::new();
+    let mut balanced: Vec<String> = Vec::new();
+    let mut region_states: Vec<String> = Vec::new();
+    for (states, group) in groups {
+        match pushdown_of(&states, &group) {
+            Some(region) => {
+                balanced.push(group_note(&states, &region));
+                region_states.extend(states.iter().cloned());
+                pushdown.push(region);
+            }
+            None => state_only.extend(group),
+        }
+    }
+
     for entry in entries {
         if entry.starts_with("/*") || entry.starts_with("//") {
             continue;
@@ -582,6 +604,15 @@ fn split_lexer_rules(
         let (states, rest) = take_leading_states(&entry);
         if !states.is_empty() && !states.iter().any(|state| state == "INITIAL") {
             state_only.push(entry.clone());
+            continue;
+        }
+        // `"{"<>X>` where `X` is now a delimited region: the scanner opens the
+        // region, so this rule has nothing left to do. Reporting it as
+        // unreadable would blame a loss that did not happen.
+        if region_states
+            .iter()
+            .any(|state| rest.contains(&format!("<>{state}>")))
+        {
             continue;
         }
         let Some((pattern, action)) = split_pattern(rest) else {
@@ -607,14 +638,39 @@ fn split_lexer_rules(
         rules.push((pattern.to_string(), action.trim().to_string()));
     }
 
-    if !state_only.is_empty() {
+    // Two very different things hide behind "a start condition". A rule that
+    // *switches* state needs to remember how it got there — a stack, which only
+    // an external scanner has. A rule that never switches only picks a token by
+    // where the parser is, which is lookahead, and the fix belongs in the token:
+    // make it a longer regular expression. Saying which is which is the
+    // difference between a note the author can act on and one they cannot.
+    let (switching, lookahead): (Vec<String>, Vec<String>) = state_only
+        .iter()
+        .cloned()
+        .partition(|rule| switches_state(rule));
+    if !switching.is_empty() {
         notes.push(format!(
-            "{} lexer rule(s) only run in a start condition, which tree-sitter cannot \
-             express (its lexer has no states); they were left out: {}. If a token below \
-             has no body, this is why",
-            state_only.len(),
-            summarize(&state_only),
+            "{} lexer rule(s) switch start conditions, i.e. the lexer has a state stack, \
+             which a stateless lexer cannot express; they were left out: {}. tree-sitter can \
+             run a scanner that holds such a stack (`%external a = delimited('{{', '}}')` is \
+             the balanced-region case), but tsg does not translate one from Flex yet. If a \
+             token below has no body, this is why",
+            switching.len(),
+            summarize(&switching),
         ));
+    }
+    if !lookahead.is_empty() {
+        notes.push(format!(
+            "{} lexer rule(s) only run in a start condition; that is lookahead, and \
+             tree-sitter can express it by making the token a longer regular expression \
+             (`FORMAT_LA: /FORMAT\\s+JSON/` rather than a state that lasts one token), so \
+             the fix belongs in the token, not in the lexer. Left out: {}",
+            lookahead.len(),
+            summarize(&lookahead),
+        ));
+    }
+    for note in &balanced {
+        notes.push(note.clone());
     }
     if state_change > 0 {
         notes.push(format!(
@@ -629,7 +685,127 @@ fn split_lexer_rules(
             summarize(&unreadable),
         ));
     }
-    Ok(rules)
+    Ok((rules, pushdown))
+}
+
+/// Which start-condition groups became external tokens, so that the count of
+/// rules "left out" is not silently larger than the count of rules that were.
+fn group_note(states: &[String], region: &Pushdown) -> String {
+    format!(
+        "start condition `{}` is a balanced region and became `%external {} = \
+         delimited('{}', '{}')`; the scanner keeps the depth locally, so nothing is lost",
+        states.join(", "),
+        region.token,
+        region.open,
+        region.close
+    )
+}
+
+/// The balanced-region idiom, if this group is one.
+///
+/// Flex's way of matching an opaque `{ … }` body is to push `X` on `{`, pop on
+/// `}` and return a token there. tree-sitter cannot push a lexer state, but it
+/// does not have to: the depth is local to the region, so a scanner can hold it.
+/// Requiring exactly this shape — one push rule, one pop rule, one catch-all,
+/// single-character delimiters, one state — is what keeps the translation
+/// honourable: anything else stays a reported loss instead of a guess.
+fn pushdown_of(states: &[String], group: &[String]) -> Option<Pushdown> {
+    if states.len() != 1 || states[0] == "INITIAL" {
+        return None;
+    }
+    let state = &states[0];
+    let mut open: Option<char> = None;
+    let mut close: Option<(char, String)> = None;
+    for entry in group {
+        let (leading, rest) = take_leading_states(entry);
+        if !leading.is_empty() {
+            return None;
+        }
+        // `(?s:.)<.>` has no action at all, and `"{"<>X>`'s action *is* the
+        // state list, so `split_pattern` (which needs whitespace) cannot read
+        // either: fall back to "the whole line is the pattern".
+        let (pattern, action) = match split_pattern(rest) {
+            Some((pattern, action)) => (pattern, action),
+            None => (rest.trim(), ""),
+        };
+        let action = action.trim();
+        if let Some(before) = pattern.trim_end().strip_suffix("<<>") {
+            // `"}"<<> TOKEN`: pop and return the token.
+            let character = single_character(before.trim_end())?;
+            if close.is_some() || action.is_empty() {
+                return None;
+            }
+            close = Some((character, action.to_string()));
+            continue;
+        }
+        if let Some(before) = pattern.trim_end().strip_suffix("<.>") {
+            // `(?s:.)<.>`: stay in the state. Any pattern is fine; it has to
+            // exist, otherwise the group is not the idiom.
+            if before.trim().is_empty() {
+                return None;
+            }
+            continue;
+        }
+        if let Some(before) = pattern.trim_end().strip_suffix(&format!("<>{state}>")) {
+            // `"{"<>X>`: re-enter the state, no token.
+            let character = single_character(before.trim_end())?;
+            if open.is_some() || !action.is_empty() {
+                return None;
+            }
+            open = Some(character);
+            continue;
+        }
+        return None;
+    }
+    let (close, token) = close?;
+    // A token name, not an action: `ACTION_CODE`, not `{ return X; }`.
+    if !is_token_name(&token) {
+        return None;
+    }
+    Some(Pushdown {
+        token,
+        open: open?,
+        close,
+    })
+}
+
+/// `"{"` or `'{'`, with the one-character escapes a delimiter can need.
+fn single_character(text: &str) -> Option<char> {
+    let mut characters = text.chars();
+    let quote = characters.next()?;
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
+    let mut character = characters.next()?;
+    if character == '\\' {
+        character = match characters.next()? {
+            't' => '\t',
+            'n' => '\n',
+            'r' => '\r',
+            'f' => '\u{c}',
+            'v' => '\u{b}',
+            '0' => '\0',
+            other => other,
+        };
+    }
+    if characters.next() != Some(quote) {
+        return None;
+    }
+    Some(character)
+}
+
+fn is_token_name(text: &str) -> bool {
+    let mut characters = text.chars();
+    match characters.next() {
+        Some(first) if first.is_alphabetic() || first == '_' => {}
+        _ => return false,
+    }
+    characters.all(|character| character.is_alphanumeric() || character == '_')
+}
+
+/// Whether a leftover rule moves the lexer, rather than only running in one state.
+fn switches_state(rule: &str) -> bool {
+    rule.contains("<<>") || rule.contains("<>") || rule.contains("<.>")
 }
 
 /// Up to three rules, for a one-line note.

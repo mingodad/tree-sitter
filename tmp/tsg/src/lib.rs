@@ -33,6 +33,7 @@ pub mod nullable;
 pub mod parser;
 pub mod precedence;
 pub mod rules;
+pub mod scanner;
 pub mod source;
 pub mod to_tsg;
 

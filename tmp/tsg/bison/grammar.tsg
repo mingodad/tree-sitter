@@ -3,6 +3,9 @@
 
 %name bison;
 
+// Flex start condition `ACTION_CODE`: one token for the whole region.
+%external ACTION_CODE = delimited('{', '}');
+
 tokens {
   STRING: /("(\\.|[^"\n\r\\])*")/;
   TSTRING: /_\(("(\\.|[^"\n\r\\])*")\)/;
@@ -44,11 +47,13 @@ prologue_declaration:
   | "%expect-rr" INT_LITERAL
   | "%file-prefix" STRING
   | "%glr-parser"
+  | "%initial-action" ACTION_CODE
   | "%language" STRING
   | "%name-prefix" STRING
   | "%no-lines"
   | "%nondeterministic-parser"
   | "%output" STRING
+  | "%param" params
   | "%pure-parser"
   | "%require" STRING
   | "%skeleton" STRING
@@ -57,11 +62,19 @@ prologue_declaration:
   | "%yacc"
   | ';';
 
+params:
+    params ACTION_CODE
+  | ACTION_CODE;
+
 grammar_declaration:
     symbol_declaration
   | "%start" symbols_1
+  | code_props_type ACTION_CODE generic_symlist
   | "%default-prec"
-  | "%no-default-prec";
+  | "%no-default-prec"
+  | "%code" ACTION_CODE
+  | "%code" ID ACTION_CODE
+  | "%union" union_name? ACTION_CODE;
 
 code_props_type:
     "%destructor"
@@ -163,6 +176,7 @@ rhses_1:
 
 rhs:
     rhs symbol named_ref_opt?
+  | rhs tag_opt? ACTION_CODE named_ref_opt?
   | rhs "%?{...}"
   | rhs "%empty"
   | rhs "%prec" symbol
@@ -171,6 +185,7 @@ rhs:
   | rhs "%expect" INT_LITERAL
   | rhs "%expect-rr" INT_LITERAL
   | symbol named_ref_opt?
+  | tag_opt? ACTION_CODE named_ref_opt?
   | "%?{...}"
   | "%empty"
   | "%prec" symbol
@@ -187,7 +202,8 @@ variable:
 
 value:
     ID
-  | STRING;
+  | STRING
+  | ACTION_CODE;
 
 id:
     ID

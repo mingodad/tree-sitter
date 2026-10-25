@@ -102,7 +102,24 @@ fn body(ast: &GrammarAst) -> String {
 
     let mut optionals: Vec<String> = Vec::new();
     for external in &ast.externals {
-        optionals.push(format!("%external {};", expr(external, 0)));
+        let name = match &external.kind {
+            ExprKind::Symbol(name) => Some(name.as_str()),
+            _ => None,
+        };
+        let scanner = name.and_then(|name| {
+            ast.scanners
+                .iter()
+                .find(|scanner| scanner.name == name)
+        });
+        match scanner {
+            Some(scanner) => optionals.push(format!(
+                "%external {} = delimited({}, {});",
+                expr(external, 0),
+                string(&scanner.open.to_string()),
+                string(&scanner.close.to_string())
+            )),
+            None => optionals.push(format!("%external {};", expr(external, 0))),
+        }
     }
     if !optionals.is_empty() {
         sections.push(optionals.join("\n"));

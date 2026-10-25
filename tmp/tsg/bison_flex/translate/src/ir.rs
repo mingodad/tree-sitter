@@ -65,6 +65,25 @@ pub struct Rule {
     pub alts: Vec<Alt>,
 }
 
+/// A balanced region recognised by a start condition, from the idiom
+///
+/// ```text
+/// <X> { "{"<>X>          re-enter X (push; no token)
+///       "}"<<> TOKEN     pop; return TOKEN
+///       (?s:.)<.>   }    anything else keeps the state
+/// ```
+///
+/// This is the one shape a stateful Flex lexer has that tree-sitter *can*
+/// express: the depth is local to the scanner, so the state Flex pushes cannot
+/// leak into the parser. `tsg` writes it as `%external TOKEN = delimited(…)`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pushdown {
+    /// The token the closing delimiter returns.
+    pub token: String,
+    pub open: char,
+    pub close: char,
+}
+
 /// The Flex half of the file, still line-oriented.
 ///
 /// C actions cannot be parsed by a context-free grammar without an opaque
@@ -77,6 +96,8 @@ pub struct Lexer {
     pub macros: Vec<(String, String)>,
     /// `pattern action`, from the rules section.
     pub rules: Vec<(String, String)>,
+    /// Start-condition groups that are balanced regions, in source order.
+    pub pushdown: Vec<Pushdown>,
     /// `%option caseless`, i.e. keywords are case-insensitive.
     pub caseless: bool,
     /// What the reader could not express, in the source's own terms: rules that

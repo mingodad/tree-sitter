@@ -22,7 +22,7 @@ Pipeline: `.tsg → src/grammar.json → tree-sitter generate → parser.c`.
 ```
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"   # rustup is keg-only
 cd /Volumes/RamDisk/tree-sitter/tmp/tsg
-cargo build && cargo test        # 80 passed
+cargo build && cargo test        # 88 passed
 ./selfhost.sh                    # all steps ok, "tsg parses tsg"
 ./sqlite3/check.sh               # SQLite Lemon port: 5 samples, no ERROR/MISSING
 ./bison_flex/check.sh            # Bison/Flex `.g` front end: postgres16.g + bison-flex.g
@@ -31,6 +31,7 @@ cargo build && cargo test        # 80 passed
 ./e2e.sh                         # all 16 grammars build; references byte-identical
 ./postgres16/check.sh            # postgres16.g → .tsg → parser.c, then parse SQL
 ./antlr/check.sh                 # antlr-v4.5.g → .tsg → parser.c, then parse 3 samples
+./bison/check.sh                 # bison.g → .tsg + src/scanner.c → carbon-lang.y, actions.y
 ```
 
 **Stopped mid dog-food #3 (`bc.g`)** — read `DOGFOOD.md` → "Dog-food #3" first.
@@ -1136,14 +1137,77 @@ which rules were left out for start conditions and 84 which could not be read**
 own lexer, no hand-written bodies, 37 `.tsg` rules → 301 generated rules, 1.3 MB
 `parser.c`, and `carbon-lang.y` parses to 4 365 nodes with 0 ERROR / 0 MISSING.
 
-What is still genuinely untranslatable, and is reported as such: `ACTION_CODE`
-is a balanced-brace pushdown (`<ACTION_CODE_ST>` recurses on `{`, pops on `}`).
-No regex can do that, so the token has no body and the 11 productions that need
-it are dropped — including mid-rule actions. That is a lexer *state machine*, and
-tree-sitter has no place for one.
+**Gate 9, second pass: `ACTION_CODE` is now a generated scanner.** It is the
+balanced-brace pushdown (`<ACTION_CODE_ST>` recurses on `{`, pops on `}`), and no
+regex can do that — but a scanner can, because the depth is *local to the
+region*: one token in, one token out, no state between tokens. `cst.rs` now
+recognises the Flex idiom (`{` re-enters the state, `}` pops and returns a token,
+`(?s:.)` keeps it) and `emit.rs` writes the one-line `%external ACTION_CODE =
+delimited('{', '}')`; `tsg` generates `src/scanner.c`. Result: 38 `.tsg` rules →
+**349 generated rules**, 1 506 917-byte `parser.c`, and two samples parse with 0
+ERROR / 0 MISSING — `carbon-lang.y` (4 365 nodes) and `actions.y` (110 nodes,
+**6 `ACTION_CODE` nodes**), which is the sample that proves the scanner ran:
+without it, actions have no token at all.
+
+**What is still not translatable** is `EPILOGUE`: `<EPILOGUE_ST>(?s:.)+ EPILOGUE`
+swallows everything after the second `%%`, which is *not* a balanced region (no
+closing delimiter, no return to `INITIAL`). It stays reported, and the one
+production that needs it is dropped. `carbon-lang.y` has no epilogue, so the gate
+is green — but the loss is printed, not hidden.
 
 One hand edit is left in `bison/patch.py`, and it is about grammar shape, not
 lexing: `ID_COLON` is the yacc hack that binds `name:` into one token, so a rule
 whose body opens with `|` needs an alternative at the use site, because `rhs`
 cannot be nullable (tsg rejects it, correctly, and says to move the emptiness to
 the caller).
+
+---
+
+## `%external NAME = delimited(open, close)`: a generated scanner
+
+The question this answers: tree-sitter has lexer states (`lex_modes[parse_state]
+.lex_state` → `lex_fn`), but the state is a *pure function of the parse state* —
+there is no lex-state stack, and there cannot be one, because incremental
+re-parsing has to be able to re-lex from a parse state alone. So a lexer that
+pushes and pops (Flex `%x` + `<<>`, or a balanced-brace body) cannot be written in
+`grammar.json`. External scanners are the supported mechanism, and `tsg` now
+generates one for the single case where the missing state is *local* to a token.
+
+Declaring it:
+
+```tsg
+%name jsonc;
+%external action_code = delimited('{', '}');
+document: action_code+;
+```
+
+`tsg -o src/grammar.json` then writes `src/scanner.c` next to the JSON, and the
+loader picks it up automatically (`crates/loader/src/loader.rs:2071`,
+`get_scanner_path`). Nothing outside `tmp/tsg` changes and no patched generator
+is needed: `grammar.json`'s `"externals"`, `render.rs`'s external-scanner glue and
+the loader were already there.
+
+The generated C is small and deliberately dumb: an `enum` in externals order
+(the generator indexes `valid_symbols` by position), `create`/`destroy`,
+`serialize`/`deserialize` that store nothing (no state survives a token), and
+`tsg_scan_delimited`, which skips **whitespace**, requires the opening delimiter,
+counts depth, and returns the token when depth reaches zero.
+
+Three limits, all reported rather than hidden:
+
+1. **Whitespace only.** The scanner runs *before* tree-sitter skips extras
+   (`lib/src/parser.c` `ts_parser__lex`), so it must skip them itself; it cannot
+   call the internal lexer, so it can only skip what it can express in
+   characters. Any extra that is not whitespace — a comment, in particular — is
+   named in a compile-time warning: a `{` that follows `/* … */` is not
+   recognised. This is exact, not a guess: `is_whitespace_pattern` accepts `[ \t\n]+`,
+   `\s+` and the parenthesised form `to_regex` emits, and rejects everything else.
+2. **The region is opaque.** A `}` inside a string or comment closes it early.
+   That is the *definition* of the token (Flex's `(?s:.)<.>` says the same), and
+   a region with real lexical structure inside needs a hand-written scanner.
+3. **No state between tokens**, hence `serialize` returns 0. If a future DSL ever
+   supports a stack that outlives a token, that is where it goes.
+
+`tsg` will not overwrite a `scanner.c` that does not begin with
+`// Generated by tsg`, and it says so when an external token has no scanner at
+all (that token can then never match, so every production needing it is dead).

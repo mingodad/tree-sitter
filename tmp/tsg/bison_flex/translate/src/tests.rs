@@ -270,6 +270,50 @@ fn a_commented_out_lexer_rule_does_not_give_a_token_its_body() {
 }
 
 #[test]
+fn a_balanced_region_start_condition_becomes_a_delimited_external() {
+    // The one stateful shape tree-sitter *can* run: the depth is local to the
+    // region, so a scanner holds it and the parse never sees a state. Recognising
+    // the idiom is what turns a reported loss into an expressible token.
+    let text = translate(&source(
+        "%token IDENT\n%token ACTION_CODE",
+        "s : IDENT ACTION_CODE ;",
+        "<INITIAL> {\n    [a-z]+    IDENT\n    \"{\"<>CODE>\n}\n\
+         <CODE> {\n    \"{\"<>CODE>\n    \"}\"<<> ACTION_CODE\n    (?s:.)<.>\n}\n",
+    ));
+    assert!(
+        text.contains("%external ACTION_CODE = delimited('{', '}');"),
+        "{text}"
+    );
+    // The push half is the scanner's job now, so it must not be a token body and
+    // must not be reported as a loss either.
+    assert!(!text.contains("ACTION_CODE:"), "{text}");
+    assert!(text.contains("IDENT: /[a-z]+/;"), "{text}");
+}
+
+#[test]
+fn a_start_condition_that_is_not_a_balanced_region_is_reported_as_pushdown() {
+    // `<<>` on its own is a pop, so the group is a state machine and nothing
+    // short of a hand-written scanner can do it. It has to say *that*, not
+    // "lookahead", or the author is told to fix something they cannot fix.
+    let grammar = read(&source(
+        "%token A",
+        "s : A ;",
+        "<st> {\n    [0-9]+    A\n    [a-z]+<st><<>\n}\n",
+    ))
+    .expect("read");
+    assert!(
+        grammar
+            .lexer
+            .notes
+            .iter()
+            .any(|note| note.contains("switch start conditions") && note.contains("state stack")),
+        "{:?}",
+        grammar.lexer.notes
+    );
+    assert!(grammar.lexer.pushdown.is_empty(), "{:?}", grammar.lexer.pushdown);
+}
+
+#[test]
 fn a_start_condition_group_that_includes_initial_is_expanded() {
     // `bison.g` keeps its whole lexer in `<INITIAL,RULES_ST> { … }`. Flex means
     // "these rules run in those states", so a group that includes INITIAL is

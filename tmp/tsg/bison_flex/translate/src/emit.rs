@@ -171,6 +171,15 @@ pub fn translate(grammar: &Grammar, options: &Options) -> Result<Translation, St
         }
     }
 
+    // A balanced region is a token, not a body: the scanner returns it. Its
+    // name has to be a token even when no `%token` line mentions it, because the
+    // Flex rule that returns it is the only declaration there is.
+    let pushdown = grammar.lexer.pushdown.clone();
+    for region in &pushdown {
+        if !declared.contains(&region.token) {
+            tokens.push(region.token.clone());
+        }
+    }
     let bodies_for = |tokens: &[String]| -> Result<Vec<(String, String)>, String> {
         let mut bodies = Vec::new();
         for name in tokens {
@@ -235,6 +244,8 @@ pub fn translate(grammar: &Grammar, options: &Options) -> Result<Translation, St
         let dead: Vec<String> = tokens
             .iter()
             .filter(|name| !la_of.contains_key(*name))
+            // An external token has no body: the scanner returns it.
+            .filter(|name| !pushdown.iter().any(|region| region.token == **name))
             .filter(|name| !bodies.iter().any(|(token, _)| token == *name))
             .cloned()
             .collect();
@@ -321,6 +332,21 @@ pub fn translate(grammar: &Grammar, options: &Options) -> Result<Translation, St
     lines.push(String::new());
     lines.push(format!("%name {};", options.name));
     lines.push(String::new());
+    for region in &pushdown {
+        lines.push(format!(
+            "// Flex start condition `{}`: one token for the whole region.",
+            region.token
+        ));
+        lines.push(format!(
+            "%external {} = delimited('{}', '{}');",
+            region.token,
+            escape_character(region.open),
+            escape_character(region.close)
+        ));
+    }
+    if !pushdown.is_empty() {
+        lines.push(String::new());
+    }
     lines.push("tokens {".to_string());
 
     // Keywords first: tree-sitter breaks a lexer tie with the earlier token, so
@@ -527,6 +553,22 @@ fn mark(
 
 /// Up to three names, then "and N more" — an error message that lists forty
 /// tokens tells the reader less than one that says there are forty.
+/// A delimiter, as a `'…'` literal in the emitted `.tsg`. Keep it to the escapes
+/// tsg's own lexer understands; anything else would be preserved verbatim and
+/// then fail to lex.
+fn escape_character(character: char) -> String {
+    match character {
+        '\n' => "\\n".to_string(),
+        '\r' => "\\r".to_string(),
+        '\t' => "\\t".to_string(),
+        '\0' => "\\0".to_string(),
+        '\u{c}' => "\\f".to_string(),
+        '\u{b}' => "\\v".to_string(),
+        '\\' | '\'' => format!("\\{character}"),
+        other => other.to_string(),
+    }
+}
+
 fn few(names: &[&str]) -> String {
     let shown = names
         .iter()
