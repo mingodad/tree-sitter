@@ -6,7 +6,10 @@ mod item_set_builder;
 mod minimize_parse_table;
 mod token_conflicts;
 
-use std::collections::BTreeSet;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt::Write as _,
+};
 
 pub use build_lex_table::LARGE_CHARACTER_RANGE_COUNT;
 use build_parse_table::BuildTableResult;
@@ -15,7 +18,7 @@ use log::{debug, info};
 use rustc_hash::FxHashMap;
 
 use self::{
-    build_lex_table::build_lex_table,
+    build_lex_table::{LexReport, Shadow, build_lex_table},
     build_parse_table::{ParseStateInfo, build_parse_table},
     coincident_tokens::CoincidentTokenIndex,
     item::ItemKeyMap,
@@ -118,6 +121,7 @@ pub fn build_tables(
     inlines: &InlinedProductionMap,
     str_pool: &StrPool,
     report_symbol_name: Option<&str>,
+    report_lex_states: Option<&str>,
     optimizations: OptLevel,
     max_states: Option<usize>,
     diagnostics: &mut Vec<Diagnostic>,
@@ -227,6 +231,16 @@ pub fn build_tables(
             &parse_state_info,
             str_pool,
             report_symbol_name,
+        );
+    }
+
+    if let Some(which) = report_lex_states {
+        report_lex_state_info(
+            syntax_grammar,
+            lexical_grammar,
+            str_pool,
+            &lex_tables.report,
+            which,
         );
     }
 
@@ -680,6 +694,231 @@ fn report_state_info<'a>(
             );
         }
     }
+}
+
+/// The names a lex report prints, resolved through the string pool.
+struct LexNames<'a> {
+    syntax_grammar: &'a SyntaxGrammar,
+    lexical_grammar: &'a LexicalGrammar,
+    str_pool: &'a StrPool,
+}
+
+impl LexNames<'_> {
+    fn name(&self, symbol: Symbol) -> String {
+        match symbol.view() {
+            SymbolView::Terminal(index) => self
+                .str_pool
+                .resolve(self.lexical_grammar.variables[usize::from(index)].name)
+                .to_string(),
+            SymbolView::External(index) => self
+                .str_pool
+                .resolve(self.syntax_grammar.external_tokens[usize::from(index)].name)
+                .to_string(),
+            SymbolView::NonTerminal(index) => self
+                .str_pool
+                .resolve(self.syntax_grammar.variables[usize::from(index)].name)
+                .to_string(),
+            SymbolView::End => "<EOF>".to_string(),
+            SymbolView::EndOfNonTerminalExtra => "<END_OF_NONTERMINAL_EXTRA>".to_string(),
+        }
+    }
+
+    fn list(&self, symbols: &[Symbol]) -> String {
+        symbols
+            .iter()
+            .map(|&symbol| self.name(symbol))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// What a dropped transition pointed at: an extra, a set of tokens, or both.
+    fn shadow_target(&self, shadow: &Shadow) -> String {
+        if shadow.pruned_is_separator {
+            if shadow.pruned_extras.is_empty() {
+                "the extras".to_string()
+            } else if shadow.pruned_extras.len() == 1 {
+                format!("extra `{}`", self.name(shadow.pruned_extras[0]))
+            } else {
+                format!("extras {}", self.list(&shadow.pruned_extras))
+            }
+        } else if shadow.pruned_tokens.is_empty() {
+            "another token".to_string()
+        } else if shadow.pruned_tokens.len() == 1 {
+            format!("token `{}`", self.name(shadow.pruned_tokens[0]))
+        } else {
+            format!("tokens {}", self.list(&shadow.pruned_tokens))
+        }
+    }
+}
+
+/// Print the lexer table: what each lex state can lex, and every transition the table
+/// dropped because a token completes at the same point.
+///
+/// This is the report that says why `1 /* c */` lexes the `/` as a division operator:
+/// where a token completes, a separator transition is dropped at equal precedence, so
+/// the comment is only lexed where no token completes on its first character.
+fn report_lex_state_info(
+    syntax_grammar: &SyntaxGrammar,
+    lexical_grammar: &LexicalGrammar,
+    str_pool: &StrPool,
+    report: &LexReport,
+    which: &str,
+) {
+    let names = LexNames {
+        syntax_grammar,
+        lexical_grammar,
+        str_pool,
+    };
+
+    let entry_states = report.states.iter().filter(|state| state.is_entry).count();
+    info!(
+        "lex states: {} ({entry_states} that a parse state starts lexing in)",
+        report.states.len()
+    );
+    if !report.extras.is_empty() {
+        info!("extras: {}", names.list(&report.extras));
+    } else if report.has_extras {
+        info!("extras: bare patterns (see `extras` in grammar.json)");
+    } else {
+        info!("extras: none");
+    }
+
+    if which == "-" {
+        report_lex_state_summary(report, &names);
+        return;
+    }
+
+    let selected = if which == "*" {
+        (0..report.states.len())
+            .filter(|&index| report.states[index].is_entry)
+            .collect::<Vec<_>>()
+    } else {
+        match which.parse::<usize>() {
+            Ok(index) if index < report.states.len() => vec![index],
+            _ => {
+                info!("no lex state {which} (there are {})", report.states.len());
+                return;
+            }
+        }
+    };
+
+    info!("");
+    for index in selected {
+        let state = &report.states[index];
+        info!("lex state: {index}");
+        if !state.is_entry {
+            info!("no parse state starts lexing in this state");
+            info!("");
+            continue;
+        }
+        info!("parse states: {}", state.parse_states.len());
+        if !state.parse_states.is_empty() {
+            let mut shown = state
+                .parse_states
+                .iter()
+                .take(12)
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            if state.parse_states.len() > 12 {
+                let _ = write!(shown, ", … ({} more)", state.parse_states.len() - 12);
+            }
+            info!("  {shown}");
+        }
+        info!("valid tokens: {}", names.list(&state.valid_tokens));
+        if state.shadows.is_empty() {
+            info!("dropped while lexing these tokens: none");
+        } else {
+            // Not necessarily dropped in this state: the transition is dropped wherever a
+            // token completes inside of this token set's lexer.
+            info!("dropped while lexing these tokens:");
+            for shadow in &state.shadows {
+                info!(
+                    "  `{}` completes, so the transition on {} into {} is dropped",
+                    names.name(shadow.completed),
+                    describe_characters(&shadow.characters),
+                    names.shadow_target(shadow),
+                );
+            }
+        }
+        info!("");
+    }
+}
+
+/// A short rendering of a transition's character set: the characters themselves when
+/// there are only a few, and a count when there are more.
+fn describe_characters(ranges: &[(char, char)]) -> String {
+    const LIMIT: u32 = 6;
+    let total: u32 = ranges
+        .iter()
+        .map(|&(start, end)| end as u32 - start as u32 + 1)
+        .sum();
+    if total > LIMIT {
+        return format!("{total} characters");
+    }
+    let mut parts = Vec::new();
+    for &(start, end) in ranges {
+        for c in start..=end {
+            parts.push(format!("'{}'", c.escape_default()));
+        }
+    }
+    parts.join(" ")
+}
+
+fn plural(count: usize, noun: &str) -> String {
+    if count == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{count} {noun}s")
+    }
+}
+
+/// The `-` form of the lex report: one line per dropped transition, with how many lex
+/// states and parse states it affects.
+fn report_lex_state_summary(report: &LexReport, names: &LexNames) {
+    /// The states one dropped transition costs, deduplicated across lexer states.
+    #[derive(Default)]
+    struct Row {
+        lex_states: BTreeSet<usize>,
+        parse_states: BTreeSet<u32>,
+    }
+
+    let mut rows = BTreeMap::<&Shadow, Row>::new();
+    for (index, state) in report.states.iter().enumerate() {
+        for shadow in &state.shadows {
+            let row = rows.entry(shadow).or_default();
+            row.lex_states.insert(index);
+            row.parse_states.extend(state.parse_states.iter().copied());
+        }
+    }
+
+    if rows.is_empty() {
+        info!("no transition is dropped in favour of a completed token");
+        return;
+    }
+
+    let (extras, tokens): (Vec<_>, Vec<_>) = rows
+        .into_iter()
+        .partition(|(shadow, _)| shadow.pruned_is_separator);
+    let section = |title: &str, rows: &[(&Shadow, Row)]| {
+        if rows.is_empty() {
+            return;
+        }
+        info!("");
+        info!("{title}");
+        for (shadow, row) in rows {
+            info!(
+                "  `{}`  ->  {} (on {})  {}, {}",
+                names.name(shadow.completed),
+                names.shadow_target(shadow),
+                describe_characters(&shadow.characters),
+                plural(row.lex_states.len(), "lex state"),
+                plural(row.parse_states.len(), "parse state"),
+            );
+        }
+    };
+    section("a token shadows an extra:", &extras);
+    section("a token shadows another token:", &tokens);
 }
 
 fn all_chars_are_alphabetical(cursor: &NfaCursor) -> bool {

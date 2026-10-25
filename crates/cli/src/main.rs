@@ -127,20 +127,32 @@ struct Generate {
     #[arg(long, short, value_name = "DIRECTORY")]
     pub output: Option<PathBuf>,
     /// Produce a report of the states for the given rule, use `-` to report every rule
-    #[arg(long, conflicts_with = "json", conflicts_with = "json_summary")]
+    #[arg(
+        long,
+        conflicts_with = "json",
+        conflicts_with = "json_summary",
+        conflicts_with = "report_lex_states"
+    )]
     pub report_states_for_rule: Option<String>,
+    /// Produce a report of the lexer states: the tokens each one lexes and the transitions
+    /// it drops. Use `-` to report the dropped transitions of the whole grammar, `*` to
+    /// report every lex state
+    #[arg(long, conflicts_with = "json", conflicts_with = "json_summary")]
+    pub report_lex_states: Option<String>,
     /// Deprecated: use --json-summary
     #[arg(
         long,
         conflicts_with = "json_summary",
-        conflicts_with = "report_states_for_rule"
+        conflicts_with = "report_states_for_rule",
+        conflicts_with = "report_lex_states"
     )]
     pub json: bool,
     /// Report conflicts in a JSON format
     #[arg(
         long,
         conflicts_with = "json",
-        conflicts_with = "report_states_for_rule"
+        conflicts_with = "report_states_for_rule",
+        conflicts_with = "report_lex_states"
     )]
     pub json_summary: bool,
     /// The name or path of the JavaScript runtime to use for generating parsers
@@ -975,6 +987,7 @@ impl Generate {
             self.grammar_path.as_deref(),
             abi_version,
             self.report_states_for_rule.as_deref(),
+            self.report_lex_states.as_deref(),
             self.js_runtime.as_deref(),
             !self.no_parser,
             if self.disable_optimizations {
