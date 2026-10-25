@@ -93,20 +93,46 @@ Flex model, and the only one that compiles to ABI-15 code.
 - Gate: `bison/check.sh` grows an `EPILOGUE` count; `bin/g2tsg` learns to emit
   `%lexer` instead of `%external … = delimited(…)`.
 
-### 3. Nullable rules  (~3 days, riskiest)
+### 3. Nullable rules — done
 
-Stop rejecting `BLANK`.  The tables already support it (`Reduce { child_count:
-0 }`), so this is `flatten_grammar` plus a zero-width reduce that must make
-progress.  Removes the `x?` inlining explosion and the `bison/patch.py` hack.
+Nullable nonterminals are legal in every position. The generator accepts empty
+productions and rejects only epsilon cycles (strongly connected zero-consumption
+handover edges); `tsg` mirrors that check with source spans and identifies the
+cycle in `--annotate`. No parser-runtime changes were needed: zero-child reduces
+already work on ABI 15. The tsg-owned Bison/Flex translator now emits nullable
+rules directly instead of expanding them at every use site.
 
-- Where: `crates/generate/src/prepare_grammar/flatten_grammar.rs`, the reduce
-  path in `lib/src/parser.c` (read-only until the tests say otherwise), and
-  `tsg`'s `nullable.rs` reporting.
-- Accept: a grammar with `rhs: | rhs "|" ids;` round-trips through
-  `tsg`/`generate`, and postgres16 loses the flattening explosion (state count
-  drops by an order of magnitude; record it).
-- Risk: an ε-cycle (`a: a?`) can loop at runtime.  Detect and reject it in
-  `tsg` *and* in the generator; a hang is the worst possible failure mode.
+- Generator: `crates/generate/src/prepare_grammar/flatten_grammar.rs` computes
+  nullability after flattening, rejects epsilon cycles iteratively, and keeps
+  EOF-constrained productions out of the empty/cycle graph.
+- Prototype: `tmp/tsg/src/nullable.rs` finds cycles in O(V + E) using iterative
+  strongly-connected components; `compile.rs` points to a cycle edge, and
+  `--annotate` distinguishes legal nullable rules from rejected cycles.
+- Validation: generator and tsg unit tests, feature corpus, parser acceptance of
+  nullable middle rules, both translator corpus paths, and postgres16 are recorded
+  in `HANDOFF.md`.
+- ABI 15; no `lib/src/parser.c` changes.
+
+#### 3a. Two zero-width reduces in a row — done
+
+Making empty rules legal exposed a real bug in the parse table, not in the
+runtime: with `decl: id int_opt alias;` and both `int_opt` and `alias` nullable,
+the parser errored on input where both are empty instead of reducing twice.
+
+The closure that computes follow sets looked exactly **one step** ahead, so in
+`a: b c` with nullable `c`, `b`'s item was given `FIRST(c)` and never learnt
+that whatever follows `a` also follows `b`. `ParseItemSetBuilder` now precomputes,
+for every production, the FIRST set of the *suffix* after each of its steps —
+walking past nullable steps — and uses it in both the per-non-terminal closure
+additions and `add_item`. A `requires_eof_lookahead` production ends in an
+implicit end-of-input, so its last suffix is `{eof}` rather than empty; that also
+keeps such productions out of the nullability fixpoint.
+
+- Validation: `test/fixtures/test_grammars/consecutive_empty_reduces` (4 corpus
+examples; 2 of them fail without the fix), 108 generator lib tests, all 122
+feature corpus grammars.
+- Measured on carbon-lang.y: 421 ERROR/MISSING before, 23 after (the remaining 23
+are a separate translator question: `x : /*empty*/ | y`, see item 1).
 
 ### 4. Reports as JSON, then the annotated dump  (~3 days) — tier A **done**
 

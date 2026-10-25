@@ -1,0 +1,51 @@
+===========================================
+two nullable rules in a row, both empty
+===========================================
+
+a
+---
+
+(declaration
+  (identifier)
+  (int_opt)
+  (alias))
+
+===========================================
+two nullable rules in a row, the second one filled
+===========================================
+
+a <x>
+---
+
+(declaration
+  (identifier)
+  (int_opt)
+  (alias
+    (tag)))
+
+===========================================
+two nullable rules in a row, the first one filled
+===========================================
+
+a 3
+---
+
+(declaration
+  (identifier)
+  (int_opt
+    (number))
+  (alias))
+
+===========================================
+two nullable rules in a row, both filled
+===========================================
+
+a 3 <x>
+---
+
+(declaration
+  (identifier)
+  (int_opt
+    (number))
+  (alias
+    (tag)))
