@@ -1,0 +1,11 @@
+// test/fixtures/test_grammars/precedence_on_single_child_negative/grammar.js
+%name precedence_on_single_child_negative;
+
+expression: function_call | identifier;
+function_call: prec.right(-1, choice(
+    seq(identifier, expression),
+    seq(identifier, block),
+    seq(identifier, expression, block),
+));
+block: seq('{', expression, '}');
+identifier: /[a-zA-Z]+/;

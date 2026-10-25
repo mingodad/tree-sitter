@@ -1,0 +1,25 @@
+
+Read this next to the source.  The translations that need judgement:
+
+  * Flex start conditions are lookahead.  `<xwith_la> reject()` followed by
+    `WITH<INITIAL> WITH_LA` means `WITH` when the next word is `TIME`.
+    Tree-sitter's lexer cannot see ahead, and does not need to: each `_LA`
+    terminal's lexeme is exactly that of its base keyword, and the parser
+    already sees the following word as its own terminal.  So every `_LA`
+    terminal is replaced by its base token (`WITH_LA` -> `WITH`,
+    `NULLS_LA` -> `NULLS_P`), and the lookahead rules are dropped.  The
+    `%prec` levels that named them (level 9 for `NOT_LA`) are unchanged.
+  * `%nonassoc` levels have no tree-sitter equivalent.  They keep their
+    place in the chain as levels with no associativity (plain `@pN`), so
+    the ordering is identical; only `1 < 2 < 3 < 4` is no longer an error.
+  * The 196 nullable rules cannot match empty as non-start rules in
+    tree-sitter.  Their references became `?` and their own bodies lost
+    `%empty`; an all-optional body became its non-empty subsequences.
+    `%prec` on an empty alternative (e.g. `%empty %prec Op`) goes with it.
+  * Terminals stay named tokens, so `unreserved_keyword : ABORT | ...`
+    reads like the source.  Keywords are case-insensitive (`%option
+    caseless`) and are listed before `IDENT` so the tie goes to the word.
+  * The Flex rules are the lexer, not PostgreSQL's scan.l: dollar quoting
+    with a tag, `E'...'`, `B'...'`, `X'...'` and doubled `''` are not
+    accepted by this source (its `dolq` start conditions only approximate
+    them).  `BCONST`/`XCONST` match the literal words, as in the source.

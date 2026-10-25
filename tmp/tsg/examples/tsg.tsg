@@ -1,0 +1,234 @@
+// A tree-sitter grammar for the tsg language, written in tsg — the language
+// describing itself, compiled by itself.
+//
+//   tsg examples/tsg.tsg -o src/grammar.json
+//   tree-sitter generate && tree-sitter parse examples/json.tsg
+//
+// Written in the EBNF surface, which is the primary one: `a b` is a sequence,
+// `a | b` an alternation, `x?` / `x*` / `x+` the multipliers, `(…)` groups, `()`
+// the empty production, `k= a` a field label, and `@left(1)` the precedence of
+// an alternative. The call form (`seq`, `choice`, …) is the interop dialect
+// `--from-json` emits. Lexical rules are grouped in a `tokens { … }` block,
+// where one rule is one token (DECLARATIVE.md §4).
+//
+// The precedence climbing mirrors the recursive-descent compiler in
+// src/parser.rs: `|` binds loosest, then juxtaposition, then `? * +`.
+
+%name tsg;
+%word identifier;
+
+%extra /\s+/;
+%extra comment;
+
+// --- file structure --------------------------------------------------------
+// A file is a sequence of directives and rule definitions. The first rule not
+// declared in a `tokens` block is the start rule.
+
+source_file: _item*;
+
+_item: directive | tokens_block | rule_definition;
+
+directive:
+    name_directive
+  | inherits_directive
+  | word_directive
+  | extra_directive
+  | extras_directive
+  | external_directive
+  | inline_directive
+  | supertypes_directive
+  | conflicts_directive
+  | precedence_directive
+  | reserved_directive;
+
+// `tokens { NAME: /…/; NUMBER: '-' /[0-9]+/ @immediate; }` is a lexical
+// section. Each rule in it is exactly one token, and the section's position in
+// the file is the token priority order: an equal-length match is resolved by the
+// earlier rule. The body is the same expression grammar as everywhere else; the
+// compiler checks that it contains only strings and patterns.
+tokens_block: 'tokens' '{' rule_definition* '}';
+
+// Both sides use the label form: `name` and `body` are fields, and the `':'` is
+// the punctuation that separates a rule definition from a label (`name= …`).
+rule_definition: name= identifier ':' body= _expression ';';
+
+// --- directives ------------------------------------------------------------
+
+name_directive: '%name' name= identifier ';';
+
+inherits_directive: '%inherits' parent= identifier ';';
+
+word_directive: '%word' token= identifier ';';
+
+extra_directive: '%extra' rule= _expression ';';
+
+// `%extras none;` is the only way to say "no extras at all" — `extras` is the
+// one collection where an absent key means `/\s/` rather than empty.
+extras_directive: '%extras' 'none' ';';
+
+external_directive: '%external' token= _expression ';';
+
+inline_directive: '%inline' rule= identifier+ ';';
+
+supertypes_directive: ('%supertypes' | '%supertype') rule= identifier+ ';';
+
+conflicts_directive: '%conflicts' rule= identifier+ ';';
+
+// Two shapes, and the difference is semantic:
+//
+//   %precedence "call" "pow";              one *ordering* — names comparable
+//                                          with each other and nothing else
+//   %precedence left "add" = '+' '-';      one *level* — a name, how it
+//                                          associates, and the terminals whose
+//                                          productions inherit it
+//
+// A directive with `left`/`right` and/or `=` is a level; without either it is an
+// ordering list. Consecutive levels form one chain, highest first.
+//
+// `left`/`right` are keywords here, so a *rule* with that name has to be written
+// `$left` inside a precedence list — the same rule as `$field`.
+//
+// `%precedence "call" = ;` is a level that *no* terminal inherits — the way a
+// name used only by `@` is placed in the chain — so the list after `=` may be
+// empty. Without the `=` the same line would be an ordering instead.
+precedence_directive:
+    ('%precedence' | '%precedences')
+    // A label on an element whose multiplier comes after it: `k= (a | b)?` is
+    // `field('k', a | b)?`. The field survives on the keyword; a *pattern* cannot
+    // name a node type through a choice, which is why the query for this field
+    // says `associativity= _` rather than `associativity= (string)`.
+    associativity= ('left' | 'right')?
+    name= precedence_name+
+    ('=' terminal= precedence_terminal*)?
+    ';';
+
+// `"add"` is a precedence *name*; `add` and `$add` are *rule references*. The
+// spelling is not cosmetic — it decides which entry tree-sitter emits.
+precedence_name: string | symbol | escaped_symbol;
+
+// A level owns terminals: string literals, patterns, or a rule that is a token
+// (`%precedence left "cmp" = '<' LANGLE;`).
+precedence_terminal: string | regex | symbol | escaped_symbol;
+
+// `%reserved keywords = 'if', 'else';` — or `= ;` for an explicitly empty set.
+reserved_directive:
+    '%reserved'
+    name= identifier
+    '='
+    (_expression (',' _expression)*)?
+    ';';
+
+// --- expressions -----------------------------------------------------------
+
+_expression: choice_expression | _sequence;
+
+choice_expression: _sequence ('|' _sequence)+ @left(1);
+
+// Juxtaposition: a flat chain of postfix expressions. The call spelling
+// `seq(a, seq(b, c))` keeps its nesting, so it is not the same tree as `a b c`
+// — which is why `--from-json` can print both and this file needs only one.
+_sequence: _element _element*;
+
+// `k= a b` names `a`, not the pair: a label belongs to one element.
+_element: labelled_expression | _postfix_expression;
+
+// `name= element` is `field('name', element)`. The `=` is what keeps this
+// distinct from a rule definition, which is the same shape with a `:` and a `;` —
+// and that difference is why a missing `;` before a new rule is still an error.
+labelled_expression: name= identifier '=' _postfix_expression;
+
+_postfix_expression: _primary_expression _postfix_operator*;
+
+_postfix_operator: '?' | '*' | '+' | annotation;
+
+// `expr '+' expr @left(3)` — the precedence of the *alternative*, which is what
+// yacc's `expr: expr '+' expr [prec]` marks. It desugars to the call it replaces:
+// `@3` is `prec(3, …)`, `@unary` is `prec(unary, …)`, `@left(x)` is
+// `prec.left(x, …)`. Because `@` comes last, the whole branch is wrapped, not the
+// last operand — that is the point of having a spelling for it.
+annotation: '@' precedence_annotation;
+
+precedence_annotation: integer | precedence_call | symbol;
+
+precedence_call:
+    associativity= ('left' | 'right' | 'dynamic')
+    '('
+    precedence= _expression
+    ')';
+
+_primary_expression:
+    call_expression
+  | string
+  | regex
+  | integer
+  | symbol
+  | parenthesised_expression
+  | escaped_symbol;
+
+// `()` is the blank rule — a production that matches nothing. It is legal only
+// where the emptiness is absorbed by a multiplier or by the start rule, which is
+// a semantic question, so the parser accepts it and `compile` decides.
+parenthesised_expression: '(' inner= _expression? ')';
+
+// `identifier` alone is a rule reference; `identifier (` is a call. Letting the
+// shift win (a lower precedence on the reduce) tells tree-sitter which one to
+// pick without a GLR split. `@-1` is the EBNF spelling of `prec(-1, identifier)`.
+symbol: identifier @-1;
+
+// `$name` refers to a rule whose name collides with a built-in function.
+escaped_symbol: '$' identifier;
+
+// A call is any name followed by `(` — the same rule the compiler uses, so
+// `field(alias, identifier)` is not a keyword collision. Whether the name is a
+// real function, and whether the arguments are valid, is a semantic question
+// answered by the lowerer, not by the parse.
+//
+// Every call takes a comma separated list of expressions; a single trailing
+// comma is tolerated.
+call_expression:
+    function= function_name
+    '('
+    (_expression (',' _expression)* ','?)?
+    ')';
+
+// `seq`, `prec.left`, `token.immediate`, and any other dotted name.
+function_name: identifier ('.' identifier)?;
+
+// --- literals --------------------------------------------------------------
+
+// Single or double quoted, with `\x41`/`\u{1F600}` style escapes and the whole
+// complement of C escapes. Newlines are legal inside a string.
+string: /'([^'\\]|\\.)*'/ | /"([^"\\]|\\.)*"/;
+
+// `/.../flags`. The flags are part of the literal, not a separate token= a
+// token never matches across whitespace, so `/x/i` is one token and `/x/ i` is
+// a regex followed by a symbol `i` — exactly how `lexer.rs` reads it. A
+// `regex_flags: token.immediate(...)` token looks tidier and makes the space
+// significant for free, but a one-letter class breaks it: tree-sitter's lexer
+// then reads `/x/ i` as a flag, which the compiler does not.
+//
+// The class is `i`, the whole accepted set, because this file is the
+// documentation of the language and `[a-zA-Z]*` would claim that any letter run
+// is a valid flag. No class can make `/x/g` an error anyway — a token pattern
+// cannot see whitespace — so a letter that is not a flag is simply a symbol, and
+// `/x/g` parses as `/x/ g`. That is the same layering as `foo(1)`: syntax
+// accepts, the semantic layer narrows with a span. `tsg` says which, and how to
+// fix it: `if you meant the rule `g`, put a space after the literal: `/…/ g``.
+//
+// `(i)?` rather than `i?` only because `i?` after the closing `/` would read as
+// a flag on this literal itself.
+//
+// The tokens are in priority order: a regex, an integer, then an identifier.
+// Comments are tokens too, but the `comment` rule below is a choice of them, so
+// it stays a nonterminal (and `%extra comment;` is still a single skip unit).
+tokens {
+    regex: /\/([^/\\\n]|\\.|\[([^\]\\]|\\.)*\])+\/(i)?/;
+    integer: /-?[0-9]+/;
+    identifier: /[A-Za-z_][A-Za-z0-9_]*/;
+    _line_comment: /\/\/[^\n]*/;
+    _block_comment: /\/\*[^*]*\*+([^/*][^*]*\*+)*\//;
+}
+
+// --- comments --------------------------------------------------------------
+
+comment: _line_comment | _block_comment;

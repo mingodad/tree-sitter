@@ -1,0 +1,7 @@
+// test/fixtures/test_grammars/aliased_token_rules/grammar.js
+%name aliased_token_rules;
+%extra /\s/;
+
+expression: 'a'
+    alias(token(seq('b', 'c')), X)
+    alias(token.immediate(seq('d', 'e')), Y);

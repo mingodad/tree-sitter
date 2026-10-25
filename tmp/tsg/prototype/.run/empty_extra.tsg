@@ -1,0 +1,4 @@
+%extra ws;
+ws: /\s*/;
+
+file: "x";

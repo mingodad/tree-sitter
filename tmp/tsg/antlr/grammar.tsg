@@ -1,0 +1,358 @@
+// ANTLR 4.5 grammars, translated from antlr-v4.5.g (Bison + Flex).
+// Translated by g2tsg from antlr-v4.5.g (read with bison_flex/grammar.tsg).
+
+%name grammar;
+
+tokens {
+  INT: /(0|[1-9]([0-9])*)/;
+  STRING_LITERAL: /((')(((\\)([btnfr"'\\]|(u(([0-9a-fA-F])(([0-9a-fA-F])(([0-9a-fA-F])([0-9a-fA-F])?)?)?))|.))|[^'\r\n\\])*('))/;
+  RBRACE: /(\})/;
+  SEMI: /(;)/;
+  ASSIGN: /(=)/;
+  DOT: /(\.)/;
+  BEGIN_ACTION: /(\{)/;
+  BEGIN_ARGUMENT: /(\[)/;
+  TOKENS: /tokens((([ \t])|([\r\n\x0c])))*\{/;
+  OPTIONS: /options((([ \t])|([\r\n\x0c])))*\{/;
+  CHANNELS: /channels((([ \t])|([\r\n\x0c])))*\{/;
+  IMPORT: /import/;
+  FRAGMENT: /fragment/;
+  LEXER: /lexer/;
+  PARSER: /parser/;
+  GRAMMAR: /grammar/;
+  COMMA: /(,)/;
+  COLONCOLON: /(::)/;
+  AT: /(@)/;
+  MODE: /mode/;
+  RULE_REF: /[a-z][A-Za-z0-9_]+/;
+  COLON: /(:)/;
+  CATCH: /catch/;
+  FINALLY: /finally/;
+  RETURNS: /returns/;
+  THROWS: /throws/;
+  LOCALS: /locals/;
+  QUESTION: /(\?)/;
+  PROTECTED: /protected/;
+  PUBLIC: /public/;
+  PRIVATE: /private/;
+  LPAREN: /(\()/;
+  RPAREN: /(\))/;
+  RARROW: /(\->)/;
+  LT: /(<)/;
+  GT: /(>)/;
+  STAR: /(\*)/;
+  PLUS_ASSIGN: /(\+=)/;
+  PLUS: /(\+)/;
+  OR: /(\|)/;
+  RANGE: /(\.\.)/;
+  POUND: /(\#)/;
+  NOT: /(\~)/;
+  TOKEN_REF: /[A-Z][A-Za-z0-9_]+/;
+  LEXER_CHAR_SET: /(\[)([^\]\\]|((\\).))+(\])/;
+}
+
+%extra /(\/\*\*(?s:.)*?(\*\/))/;
+%extra /(\/\*(?s:.)*?(\*\/))/;
+%extra /(\/\/[^\r\n]*)/;
+%extra /(([ \t])|([\r\n\x0c]))+/;
+
+// Bison lists precedence lowest first; tsg wants the descending chain.
+// `nonassoc` becomes a level with no associativity (see the notes above).
+
+
+// The first rule outside `tokens` is the start rule.
+
+grammarSpec:
+    grammarDecl prequelConstruct_zom? rules? modeSpec_zom?;
+
+modeSpec_zom:
+    modeSpec_zom modeSpec
+  | modeSpec;
+
+prequelConstruct_zom:
+    prequelConstruct_zom prequelConstruct
+  | prequelConstruct;
+
+grammarDecl:
+    grammarType identifier SEMI;
+
+grammarType:
+    LEXER GRAMMAR
+  | PARSER GRAMMAR
+  | GRAMMAR;
+
+prequelConstruct:
+    optionsSpec
+  | delegateGrammars
+  | tokensSpec
+  | channelsSpec;
+
+optionsSpec:
+    OPTIONS optionSEMI_zom? RBRACE;
+
+optionSEMI_zom:
+    optionSEMI_zom option SEMI
+  | option SEMI;
+
+option:
+    identifier ASSIGN optionValue;
+
+optionValue:
+    identifier DOTidentifier_zom?
+  | STRING_LITERAL
+  | INT;
+
+DOTidentifier_zom:
+    DOTidentifier_zom DOT identifier
+  | DOT identifier;
+
+delegateGrammars:
+    IMPORT delegateGrammar COMMAdelegateGrammar_zom? SEMI;
+
+COMMAdelegateGrammar_zom:
+    COMMAdelegateGrammar_zom COMMA delegateGrammar
+  | COMMA delegateGrammar;
+
+delegateGrammar:
+    identifier ASSIGN identifier
+  | identifier;
+
+tokensSpec:
+    TOKENS idList_opt? RBRACE;
+
+idList_opt:
+    idList;
+
+channelsSpec:
+    CHANNELS idList_opt? RBRACE;
+
+idList:
+    identifier idList_zom? comma_opt?;
+
+comma_opt:
+    COMMA;
+
+idList_zom:
+    idList_zom COMMA identifier
+  | COMMA identifier;
+
+actionScopeName:
+    identifier
+  | LEXER
+  | PARSER;
+
+modeSpec:
+    MODE identifier SEMI lexerRuleSpec_zom?;
+
+lexerRuleSpec_zom:
+    lexerRuleSpec_zom lexerRuleSpec
+  | lexerRuleSpec;
+
+rules:
+    rules ruleSpec
+  | ruleSpec;
+
+ruleSpec:
+    parserRuleSpec
+  | lexerRuleSpec;
+
+parserRuleSpec:
+    ruleModifiers_opt? RULE_REF throwsSpec_opt? rulePrequel_zom? COLON ruleBlock? SEMI;
+
+rulePrequel_zom:
+    rulePrequel_zom rulePrequel
+  | rulePrequel;
+
+throwsSpec_opt:
+    throwsSpec;
+
+ruleModifiers_opt:
+    ruleModifiers;
+
+rulePrequel:
+    optionsSpec;
+
+throwsSpec:
+    THROWS identifier COMMAidentifier_zom?;
+
+COMMAidentifier_zom:
+    COMMAidentifier_zom COMMA identifier
+  | COMMA identifier;
+
+ruleModifiers:
+    ruleModifier
+  | ruleModifiers ruleModifier;
+
+ruleModifier:
+    PUBLIC
+  | PRIVATE
+  | PROTECTED
+  | FRAGMENT;
+
+ruleBlock:
+    ruleAltList;
+
+ruleAltList:
+    ruleAltList OR labeledAlt?
+  | labeledAlt;
+
+labeledAlt:
+    alternative POUNDidentifier_opt?
+  | POUNDidentifier_opt;
+
+POUNDidentifier_opt:
+    POUND identifier;
+
+lexerRuleSpec:
+    fragment_opt? TOKEN_REF optionsSpec_opt? COLON lexerAltList? SEMI;
+
+optionsSpec_opt:
+    optionsSpec;
+
+fragment_opt:
+    FRAGMENT;
+
+lexerAltList:
+    lexerAltList OR lexerAlt?
+  | lexerAlt;
+
+lexerAlt:
+    lexerElements
+  | lexerElements lexerCommands;
+
+lexerElements:
+    lexerElement
+  | lexerElements lexerElement;
+
+lexerElement:
+    lexerAtom ebnfSuffix_opt?
+  | LPAREN lexerAltList? RPAREN ebnfSuffix_opt?;
+
+ebnfSuffix_opt:
+    ebnfSuffix;
+
+lexerCommands:
+    RARROW lexerCommand COMMAlexerCommand_zom?;
+
+COMMAlexerCommand_zom:
+    COMMAlexerCommand_zom COMMA lexerCommand
+  | COMMA lexerCommand;
+
+lexerCommand:
+    lexerCommandName LPAREN lexerCommandExpr RPAREN
+  | lexerCommandName;
+
+lexerCommandName:
+    identifier
+  | MODE;
+
+lexerCommandExpr:
+    identifier
+  | INT;
+
+altList:
+    altList OR alternative?
+  | alternative;
+
+alternative:
+    elementOptions_opt? element_oom;
+
+element_oom:
+    element
+  | element_oom element;
+
+elementOptions_opt:
+    elementOptions;
+
+element:
+    labeledElement ebnfSuffix_opt?
+  | atom ebnfSuffix_opt?
+  | ebnf;
+
+labeledElement:
+    identifier assign atomOrBlock;
+
+atomOrBlock:
+    atom
+  | block;
+
+assign:
+    ASSIGN
+  | PLUS_ASSIGN;
+
+ebnf:
+    block
+  | block ebnfSuffix;
+
+ebnfSuffix:
+    QUESTION question_opt?
+  | STAR question_opt?
+  | PLUS question_opt?;
+
+question_opt:
+    QUESTION;
+
+lexerAtom:
+    characterRange
+  | terminal
+  | notSet
+  | LEXER_CHAR_SET
+  | DOT elementOptions_opt?;
+
+atom:
+    terminal
+  | ruleref
+  | notSet
+  | DOT elementOptions_opt?;
+
+notSet:
+    NOT setElement
+  | NOT blockSet;
+
+blockSet:
+    LPAREN setElementAlt RPAREN;
+
+setElementAlt:
+    setElement
+  | setElementAlt OR setElement;
+
+setElement:
+    TOKEN_REF elementOptions_opt?
+  | STRING_LITERAL elementOptions_opt?
+  | characterRange
+  | LEXER_CHAR_SET;
+
+block:
+    LPAREN ruleActionList? altList? RPAREN;
+
+ruleActionList:
+    optionsSpec_opt? COLON;
+
+ruleref:
+    RULE_REF elementOptions_opt?;
+
+characterRange:
+    STRING_LITERAL RANGE STRING_LITERAL;
+
+terminal:
+    TOKEN_REF elementOptions_opt?
+  | STRING_LITERAL elementOptions_opt?;
+
+elementOptions:
+    LT elementOption COMMAelementOption_zom? GT;
+
+COMMAelementOption_zom:
+    COMMAelementOption_zom COMMA elementOption
+  | COMMA elementOption;
+
+elementOption:
+    identifier
+  | identifier ASSIGN idOrStr;
+
+idOrStr:
+    identifier
+  | STRING_LITERAL;
+
+identifier:
+    RULE_REF
+  | TOKEN_REF;

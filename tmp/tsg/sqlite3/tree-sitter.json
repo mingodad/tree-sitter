@@ -1,0 +1,17 @@
+{
+  "grammars": [
+    {
+      "name": "sqlite3",
+      "camelcase": "Sqlite3",
+      "scope": "source.sqlite3",
+      "path": ".",
+      "file-types": ["sql", "sqlite", "sqlite3"]
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "MIT",
+    "description": "SQLite SQL, translated from sqlite3.lemonex",
+    "links": { "repository": "https://example.invalid/sqlite3" }
+  }
+}

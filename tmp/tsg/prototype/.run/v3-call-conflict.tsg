@@ -1,0 +1,194 @@
+// Lua 5.3, translated from lua53.lemonex (Lemon + integrated lexer).
+//
+// Translation notes — read these with the source side by side:
+//
+//   * Terminals are inlined as string literals instead of becoming named rules
+//     (Lemon's `PLUS ::= "+"`), which is the tree-sitter idiom and keeps the
+//     tree free of wrapper nodes. The mapping is one-to-one with the names in
+//     the .lemonex file.
+//   * Lemon `%left` / `%right` become `prec.left` / `prec.right` with *named*
+//     precedences. Named levels are an ordering chain, highest first, and levels
+//     not mentioned together are incomparable — so operators that share a level
+//     (`+` and `-`) share a name.
+//   * Lemon `[LPAREN]` rule precedence (`stat ::= funccall. [LPAREN]`) becomes
+//     `prec(call, …)`: reducing to a callable must beat shifting `(` is not the
+//     goal; equal precedence plus tree-sitter's shift preference is.
+//   * Empty productions cannot exist in tree-sitter outside the start rule
+//     (`semi`, `statlist`, `scope`, `parlist` in the source), so they become
+//     `optional(…)` / `repeat(…)`.
+//   * `scope`/`binding` only accumulate the list of locals for the semantic
+//     actions. There are no actions here, so they are dropped; `block` states the
+//     same language directly.
+//   * The Flex start conditions LONGCOMMENT / LONGSTRING have no equivalent: a
+//     tree-sitter grammar is scannerless. Long comments and long strings are
+//     single regex tokens instead, which cannot count the `=` signs exactly.
+
+%name lua53;
+%word NAME;
+
+// Highest first: this is one descending chain, so every level is comparable
+// with every other. Mirrors the source's %left/%right lines, read bottom-up.
+// Quoted: a bare name here would be a *rule* reference (SYMBOL in
+// `precedences`), while `prec(call, …)` refers to a precedence *name*. tsg copies
+// both forms faithfully, so the quotes are semantic, not cosmetic.
+%precedence
+    "call" "pow" "unary" "mul" "add" "concat" "shift"
+    "band" "bxor" "bor" "compare" "and_" "or_";
+
+%extra /\s/;
+%extra comment;
+
+// `{f,}` vs `{f,g}`: whether a `,`/`;` after the last field is the table's
+// trailing separator is not LR(1)-decidable — the source gets away with it
+// because Lemon defers the decision in the automaton, tree-sitter needs GLR.
+%conflicts fieldlist;
+
+// A Lua block may be empty (`do end`, `local f = function() end`). tree-sitter
+// rejects any non-start rule that matches the empty string, so `block` is
+// *guaranteed non-empty* here and every use site says `optional(block)`.
+chunk: optional(block);
+
+block: choice(
+    seq(repeat1(seq(stat, optional(';'))), optional(seq(laststat, optional(';')))),
+    seq(laststat, optional(';')),
+);
+
+stat:
+    seq('do', optional(block), 'end')
+  | seq('if', conds, 'end')
+  | seq('while', exp, 'do', optional(block), 'end')
+  | seq('repeat', optional(block), 'until', exp)
+  | seq('for', NAME, '=', explist2, 'do', optional(block), 'end')
+  | seq('for', namelist, 'in', exprlist, 'do', optional(block), 'end')
+  | seq('function', funcname, funcbody)
+  | seq('goto', NAME)
+  | label
+  // The source's `binding`/`scope` rules only differ in how they accumulate
+  // locals for the semantic actions, so the two shapes are spelled out here.
+  | seq('local', 'function', NAME, funcbody)
+  | seq('local', namelist, optional(seq('=', exprlist)))
+  | seq(setlist, '=', exprlist)
+  | prec(call, funccall);
+
+conds: choice(condlist, seq(condlist, 'else', optional(block)));
+
+condlist: seq(cond, repeat(seq('elseif', cond)));
+
+cond: seq(exp, 'then', optional(block));
+
+laststat: choice('break', 'return', seq('return', exprlist));
+
+label: seq('::', NAME, '::');
+
+namelist: seq(NAME, repeat(seq(',', NAME)));
+
+exprlist: seq(exp, repeat(seq(',', exp)));
+
+// `for i = a, b [, c]` needs at least two, at most three expressions.
+explist2: seq(exp, ',', exp, optional(seq(',', exp)));
+
+funcname: choice(dottedname, seq(dottedname, ':', NAME));
+
+dottedname: seq(NAME, repeat(seq('.', NAME)));
+
+exp:
+    'nil'
+  | 'true'
+  | 'false'
+  | INTEGER
+  | FLOAT
+  | STRING
+  | '...'
+  | function
+  | table
+  | prec(call, var)
+  | prec(call, funccall)
+  | prec(unary, seq('not', exp))
+  | prec(unary, seq('#', exp))
+  // `-` and `~` are additive operands by their literal, so the unary
+  // productions have to name their level explicitly: this is the source's
+  // `[NOT]` rule precedence.
+  | prec(unary, seq('-', exp))
+  | prec(unary, seq('~', exp))
+  | prec.left(or_, seq(exp, 'or', exp))
+  | prec.left(and_, seq(exp, 'and', exp))
+  | prec.left(compare, seq(exp, '<', exp))
+  | prec.left(compare, seq(exp, '<=', exp))
+  | prec.left(compare, seq(exp, '>', exp))
+  | prec.left(compare, seq(exp, '>=', exp))
+  | prec.left(compare, seq(exp, '==', exp))
+  | prec.left(compare, seq(exp, '~=', exp))
+  | prec.left(bor, seq(exp, '|', exp))
+  | prec.left(bxor, seq(exp, '~', exp))
+  | prec.left(band, seq(exp, '&', exp))
+  | prec.left(shift, seq(exp, '<<', exp))
+  | prec.left(shift, seq(exp, '>>', exp))
+  | prec.right(concat, seq(exp, '..', exp))
+  | prec.left(add, seq(exp, '+', exp))
+  | prec.left(add, seq(exp, '-', exp))
+  | prec.left(mul, seq(exp, '*', exp))
+  | prec.left(mul, seq(exp, '/', exp))
+  | prec.left(mul, seq(exp, '//', exp))
+  | prec.left(mul, seq(exp, '%', exp))
+  | prec.right(pow, seq(exp, '^', exp))
+  | prec(call, seq('(', exp, ')'));
+
+setlist: seq(var, repeat(seq(',', var)));
+
+var:
+    NAME
+  | prec(call, seq(var, '[', exp, ']'))
+  | prec(call, seq(var, '.', NAME))
+  | prec(call, seq(funccall, '[', exp, ']'))
+  | prec(call, seq(funccall, '.', NAME))
+  | prec(call, seq('(', exp, ')', '[', exp, ']'))
+  | prec(call, seq('(', exp, ')', '.', NAME));
+
+funccall:
+    prec(call, seq(var, args))
+  | prec(call, seq(var, ':', NAME, args))
+  | prec(call, seq(funccall, args))
+  | prec(call, seq(funccall, ':', NAME, args))
+  | prec(call, seq('(', exp, ')', args))
+  | prec(call, seq('(', exp, ')', ':', NAME, args));
+
+args: choice(seq('(', optional(exprlist), ')'), table, STRING);
+
+function: seq('function', funcbody);
+
+funcbody: seq(params, optional(block), 'end');
+
+// Same empty-production problem as `block`: `()` is a valid parameter list.
+params: seq('(', optional(parlist), ')');
+
+// `parlist ::= namelist | namelist ',' DOTS | DOTS` is lookahead-2 (`, NAME` vs
+// `, DOTS`), which is why it forks the parser. Treating `...` as just another
+// list item makes it uniform — at the cost of accepting `(..., a)`, which the
+// source does not (and which would need an external scanner to reject).
+parlist: seq(choice(NAME, '...'), repeat(seq(',', choice(NAME, '...'))));
+
+table: seq('{', optional(seq(fieldlist, optional(choice(',', ';')))), '}');
+
+fieldlist: seq(field, repeat(seq(choice(',', ';'), field)));
+
+field:
+    exp
+  | seq(NAME, '=', exp)
+  | seq('[', exp, ']', '=', exp);
+
+// ------------------------------- tokens ---------------------------------
+
+// `--[[ … ]]` is a long comment; everything else after `--` runs to the end of
+// the line. The source needs two lexer modes for this; one token is enough.
+comment: token(/--(\[=*\[(.|\n)*\]=*\]|[^\n]*)/);
+
+NAME: /[a-zA-Z_][a-zA-Z_0-9]*/;
+
+INTEGER: /[0-9]+|0[xX][0-9a-fA-F]+/;
+
+FLOAT: /[0-9]+\.[0-9]*([eE][+-]?[0-9]+)?/;
+
+STRING: choice(
+    token(/"(\\.|[^"\\\n])*"|'(\\.|[^'\\\n])*'/),
+    token(/\[=*\[(.|\n)*\]=*\]/),
+);

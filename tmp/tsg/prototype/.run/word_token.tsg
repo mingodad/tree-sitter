@@ -1,0 +1,5 @@
+%extras none;
+%word kw;
+
+file: kw;
+kw: seq("i", "f");

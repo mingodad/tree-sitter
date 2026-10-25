@@ -1,0 +1,12 @@
+// test/fixtures/test_grammars/inline_rules/grammar.js
+%name inline_rules;
+%extra /\s/;
+%inline expression;
+
+program: repeat1(statement);
+statement: seq(expression, ';');
+expression: sum | product | number | parenthesized_expression;
+parenthesized_expression: seq('(', expression, ')');
+sum: prec.left(seq(expression, '+', expression));
+product: prec.left(2, seq(expression, '*', expression));
+number: /\d+/;

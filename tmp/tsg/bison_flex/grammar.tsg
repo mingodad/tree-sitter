@@ -1,0 +1,140 @@
+// A tree-sitter grammar for the joined Bison/Flex `.g` format.
+//
+// The declarative Bison section and the Bison rule bodies are parsed
+// structurally. The Flex section is line-oriented: C actions make it impossible
+// to parse as a context-free grammar without an opaque scanner, and the
+// translator only needs the raw rule lines.
+//
+// This is a first cut aimed at real grammars such as postgres16.g. It is
+// deliberately permissive about sections that are line-oriented, and strict
+// about the Bison rule structure.
+
+%name bison_flex;
+
+%extra WS;
+%extra NL;
+%extra COMMENT;
+
+tokens {
+  // Newlines are extras, but also explicit tokens: the lexer returns them when
+  // a directive or a Flex line needs a terminator.
+  NL: /\r?\n/;
+  WS: /[ \t]+/;
+  COMMENT: /\/\/[^\n]*|\/\*([^*]|\*+[^*/])*\*+\//;
+
+  // `%%` plus anything after it on the same line (usually a comment).
+  SectionSep: /%%[^\n]*/;
+
+  // A complete non-empty line in the Flex section.
+  LexerLine: /[^\n]+/;
+
+  // Bison declarations.
+  PercentToken: '%token';
+  PercentFallback: '%fallback';
+  PercentLeft: '%left';
+  PercentNonassoc: '%nonassoc';
+  PercentPrecedence: '%precedence';
+  PercentRight: '%right';
+  PercentStart: '%start';
+  PercentTokenIndent: '%token_indent';
+  PercentTokenDedent: '%token_dedent';
+  PercentTokenSymbolTable: '%token_symbol_table';
+
+  // Bison rule punctuation and annotations.
+  PercentEmpty: '%empty';
+  PercentPrec: '%prec';
+  Colon: ':';
+  Semi: ';';
+  Pipe: '|';
+  LBracket: '[';
+  RBracket: ']';
+  LParen: '(';
+  RParen: ')';
+  LBrace: '{';
+  RBrace: '}';
+  Question: '?';
+  Star: '*';
+  Plus: '+';
+
+  // A `#ProductionAlias` used by the source grammar.
+  ProdAlias: /#[A-Za-z_][0-9A-Za-z_]*/;
+
+  // A `<type>` tag in a declaration.
+  TypeTag: /<[A-Za-z_][0-9A-Za-z_]*>/;
+
+  // Identifiers and token names.
+  Name: /[.A-Za-z_][-.0-9A-Za-z_]*/;
+
+  // Single- or double-quoted literal token, including all Bison escapes.
+  Literal: /'([^'\\]|\\.)*'|"([^"\\]|\\.)*"/;
+}
+
+source_file:
+    directive*
+    SectionSep
+    grule*
+    SectionSep
+    LexerLine*
+    SectionSep
+    LexerLine*
+    SectionSep;
+
+// --- Bison declarations ----------------------------------------------------
+
+directive:
+    PercentFallback decl_tokens
+  | PercentLeft decl_tokens
+  | PercentNonassoc decl_tokens
+  | PercentPrecedence decl_tokens
+  | PercentRight decl_tokens
+  | PercentStart Name
+  | PercentToken decl_tokens
+  | PercentTokenIndent Name
+  | PercentTokenDedent Name
+  | PercentTokenSymbolTable Name;
+
+decl_tokens: decl_token+;
+decl_token: Literal | Name | TypeTag;
+
+// --- Bison rules -----------------------------------------------------------
+
+// A production alternative may be empty. Rather than a nullable `production`
+// rule (tree-sitter forbids those below the start rule), the optional pieces are
+// spelled at each use site.
+grule:
+    Name Colon
+    (alt_rhs? opt_prec? opt_prod_alias?)
+    (Pipe (alt_rhs? opt_prec? opt_prod_alias?))*
+    Semi;
+
+alt_rhs: PercentEmpty | rhs_sequence;
+
+rhs_sequence: rhs+;
+
+rhs: rhs_atom rhs_postfix*;
+
+rhs_atom:
+    Literal
+  | Name
+  | LBracket
+      (alt_rhs? opt_prec? opt_prod_alias?)
+      (Pipe (alt_rhs? opt_prec? opt_prod_alias?))*
+    RBracket
+  | LBrace
+      (alt_rhs? opt_prec? opt_prod_alias?)
+      (Pipe (alt_rhs? opt_prec? opt_prod_alias?))*
+    RBrace
+  | LParen
+      (alt_rhs? opt_prec? opt_prod_alias?)
+      (Pipe (alt_rhs? opt_prec? opt_prod_alias?))*
+    RParen;
+
+rhs_postfix: Question | Star | Plus;
+
+opt_prec: PercentPrec (Literal | Name);
+
+opt_prod_alias: ProdAlias;
+
+// The Flex sections are intentionally line-oriented: a line may be a `%x`
+// directive, an `%option`, a macro definition, a lexer rule, a C action line,
+// or a comment. The translator splits and interprets the lines it cares about.

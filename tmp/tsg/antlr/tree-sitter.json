@@ -1,0 +1,16 @@
+{
+  "grammars": [
+    {
+      "name": "grammar",
+      "camelcase": "Grammar",
+      "scope": "source.antlr",
+      "path": ".",
+      "file-types": ["g", "antlr"]
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "BSD-3-Clause",
+    "description": "ANTLR 4.5, translated from antlr-v4.5.g (Bison + Flex)"
+  }
+}

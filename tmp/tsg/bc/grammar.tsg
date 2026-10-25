@@ -1,0 +1,196 @@
+// bc — GNU bc calculator (translated from bc.g)
+// Translated by g2tsg from bc.g (read with bison_flex/grammar.tsg).
+
+%name bc;
+
+tokens {
+  Define: /define/;
+  Break: /break/;
+  Quit: /quit/;
+  Length: /length/;
+  Return: /return/;
+  For: /for/;
+  If: /if/;
+  While: /while/;
+  Sqrt: /sqrt/;
+  Else: /else/;
+  Scale: /scale/;
+  Ibase: /ibase/;
+  Obase: /obase/;
+  Auto: /auto/;
+  Read: /read/;
+  Random: /random/;
+  Warranty: /Warranty/;
+  Halt: /halt/;
+  Last: /last/;
+  Continue: /Continue/;
+  Print: /Print/;
+  Limits: /Limits/;
+  HistoryVar: /HistoryVar/;
+  Void: /void/;
+  ENDOFLINE: /\n/;
+  AND: /&&/;
+  OR: /\|\|/;
+  NOT: /!/;
+  STRING: /"(\\.|[^"\n\r\\])*"/;
+  NAME: /([a-z_])([a-z_0-9])*/;
+  NUMBER: /([0-9A-F])+(\.([0-9A-F])+)?|([0-9A-F])+\.|\.([0-9A-F])+/;
+  ASSIGN_OP: /=|\+=|-=|\*=|\/=|%=|\^=/;
+  REL_OP: /==|<=|>=|!=|<|>/;
+  INCR_DECR: /\+\+|--/;
+}
+
+%extra /[ \t]+/;
+%extra /\/\*(?s:.)*?\*\//;
+
+// Bison lists precedence lowest first; tsg wants the descending chain.
+// `nonassoc` becomes a level with no associativity (see the notes above).
+%precedence "p12" = INCR_DECR;
+%precedence "p11" = ;
+%precedence right "p10" = '^';
+%precedence left "p9" = '*' '/' '%';
+%precedence left "p8" = '+' '-';
+%precedence right "p7" = ASSIGN_OP;
+%precedence left "p6" = REL_OP;
+%precedence "p5" = NOT;
+%precedence left "p4" = AND;
+%precedence left "p3" = OR;
+%precedence "p2" = Else;
+%precedence "p1" = ;
+
+// Bison resolves the dangling else with `%nonassoc IF_WITHOUT_ELSE` and
+// `%empty %prec IF_WITHOUT_ELSE`. tree-sitter cannot put a precedence on an
+// empty production and prefers the shift, which is the same tree, so the
+// conflict is declared rather than resolved.
+%conflicts statement;
+
+// The first rule outside `tokens` is the start rule.
+
+program:
+    program input_item
+  | input_item;
+
+input_item:
+    semicolon_list? ENDOFLINE
+  | function;
+
+opt_newline:
+    ENDOFLINE;
+
+semicolon_list:
+    semicolon_list ';' statement_or_error
+  | semicolon_list ';'
+  | statement_or_error;
+
+statement_list:
+    statement_list ENDOFLINE
+  | statement_list ENDOFLINE statement_or_error
+  | statement_list ';'
+  | statement_list ';' statement
+  | statement_or_error;
+
+statement_or_error:
+    statement;
+
+statement:
+    Warranty
+  | Limits
+  | expression
+  | STRING
+  | Break
+  | Continue
+  | Quit
+  | Halt
+  | Return return_expression?
+  | For '(' opt_expression? ';' opt_expression? ';' opt_expression? ')' opt_newline? statement
+  | If '(' expression ')' opt_newline? statement opt_else?
+  | While '(' expression ')' opt_newline? statement
+  | '{' statement_list? '}'
+  | Print print_list;
+
+print_list:
+    print_element
+  | print_element ',' print_list;
+
+print_element:
+    STRING
+  | expression;
+
+opt_else:
+    Else opt_newline? statement;
+
+function:
+    Define opt_void? NAME '(' opt_parameter_list? ')' opt_newline? '{' required_eol? opt_auto_define_list? statement_list? '}';
+
+opt_void:
+    Void;
+
+opt_parameter_list:
+    define_list;
+
+opt_auto_define_list:
+    Auto define_list ENDOFLINE
+  | Auto define_list ';';
+
+define_list:
+    NAME
+  | NAME '[' ']'
+  | '*' NAME '[' ']'
+  | '&' NAME '[' ']'
+  | define_list ',' NAME
+  | define_list ',' NAME '[' ']'
+  | define_list ',' '*' NAME '[' ']'
+  | define_list ',' '&' NAME '[' ']';
+
+opt_argument_list:
+    argument_list;
+
+argument_list:
+    expression
+  | NAME '[' ']'
+  | argument_list ',' expression
+  | argument_list ',' NAME '[' ']';
+
+opt_expression:
+    expression;
+
+return_expression:
+    expression;
+
+expression:
+    named_expression ASSIGN_OP expression
+  | expression AND expression
+  | expression OR expression
+  | NOT expression
+  | expression REL_OP expression
+  | expression '+' expression
+  | expression '-' expression
+  | expression '*' expression
+  | expression '/' expression
+  | expression '%' expression
+  | expression '^' expression
+  | '-' expression @p11
+  | named_expression
+  | NUMBER
+  | '(' expression ')'
+  | NAME '(' opt_argument_list? ')'
+  | INCR_DECR named_expression
+  | named_expression INCR_DECR
+  | Length '(' expression ')'
+  | Sqrt '(' expression ')'
+  | Scale '(' expression ')'
+  | Read '(' ')'
+  | Random '(' ')';
+
+named_expression:
+    NAME
+  | NAME '[' expression ']'
+  | Ibase
+  | Obase
+  | Scale
+  | HistoryVar
+  | Last;
+
+required_eol:
+    required_eol ENDOFLINE
+  | ENDOFLINE;

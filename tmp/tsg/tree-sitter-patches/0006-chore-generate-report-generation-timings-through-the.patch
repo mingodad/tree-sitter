@@ -1,0 +1,227 @@
+From 7e75cdb2f56ad20099043a4d91220e3041bb5fc2 Mon Sep 17 00:00:00 2001
+From: Domingo Alvarez Duarte <mingo@Domingos-MacBook-Air.local>
+Date: Sun, 25 Oct 2026 13:43:15 +0100
+Subject: [PATCH 6/8] chore(generate): report generation timings through the
+ `log` crate
+
+Stage and lexer timings were behind ad-hoc environment variables
+(`TS_DEBUG_TIMING`, `TS_DEBUG_CONFLICTS`) that duplicated something the
+CLI already has: `generate --log` turns on debug logging, which is the
+same channel the rest of the generator writes to. Route the timings
+there instead, so they are one flag away, and so a library caller that
+installs a logger gets them without knowing about the variables.
+
+The thread count of the conflict matrix moves into `pair_workers`, which
+the `token_conflicts` stage now reports together with the token count, so
+the stage line says how the work was split.
+
+The parse-state heartbeat held the only remaining unconditional
+`eprintln!` in the hot loop: print it when stderr is a terminal (or when
+debug logging is on) only. Sending `generate` output to a file should not
+add progress lines just because generation got slow.
+---
+ crates/generate/src/build_tables.rs           | 25 +++++++++----
+ .../src/build_tables/build_lex_table.rs       | 16 ++++-----
+ .../src/build_tables/build_parse_table.rs     | 11 +++---
+ .../src/build_tables/token_conflicts.rs       | 35 ++++++++-----------
+ 4 files changed, 49 insertions(+), 38 deletions(-)
+
+diff --git a/crates/generate/src/build_tables.rs b/crates/generate/src/build_tables.rs
+index 9218f70..d79962e 100644
+--- a/crates/generate/src/build_tables.rs
++++ b/crates/generate/src/build_tables.rs
+@@ -122,16 +122,24 @@ pub fn build_tables(
+     max_states: Option<usize>,
+     diagnostics: &mut Vec<Diagnostic>,
+ ) -> BuildTableResult<Tables> {
+-    let timing = std::env::var_os("TS_DEBUG_TIMING").is_some();
+     let mut stage_time = std::time::Instant::now();
+     macro_rules! stage {
+         ($name:expr) => {
+-            if timing {
++            stage!($name, String::new)
++        };
++        ($name:expr, $detail:expr) => {
++            if log::log_enabled!(log::Level::Debug) {
+                 let now = std::time::Instant::now();
+-                eprintln!(
+-                    "  stage {:24} {:>8.2}s",
++                let detail = $detail();
++                debug!(
++                    "  stage {:20} {:>8.2}s{}",
+                     $name,
+-                    now.duration_since(stage_time).as_secs_f64()
++                    now.duration_since(stage_time).as_secs_f64(),
++                    if detail.is_empty() {
++                        detail
++                    } else {
++                        format!(" {detail}")
++                    },
+                 );
+                 let _ = std::mem::replace(&mut stage_time, now);
+             }
+@@ -154,8 +162,13 @@ pub fn build_tables(
+         diagnostics,
+     )?;
+     stage!("parse_table");
++    let token_count = lexical_grammar.variables.len();
+     let token_conflict_map = TokenConflictMap::new(lexical_grammar, following_tokens);
+-    stage!("token_conflicts");
++    stage!("token_conflicts", || format!(
++        "{} tokens, {} threads",
++        token_count,
++        token_conflicts::pair_workers(token_count)
++    ));
+     let coincident_token_index =
+         CoincidentTokenIndex::new(&parse_table, lexical_grammar, syntax_grammar.word_token);
+     stage!("coincident_tokens");
+diff --git a/crates/generate/src/build_tables/build_lex_table.rs b/crates/generate/src/build_tables/build_lex_table.rs
+index 137de57..17c1e46 100644
+--- a/crates/generate/src/build_tables/build_lex_table.rs
++++ b/crates/generate/src/build_tables/build_lex_table.rs
+@@ -41,12 +41,12 @@ pub fn build_lex_table(
+         LexTable::default()
+     };
+ 
+-    let debug = std::env::var_os("TS_DEBUG_TIMING").is_some();
++    let timing = log::log_enabled!(log::Level::Debug);
+     let mut t0 = std::time::Instant::now();
+     let time = |name: &str, t0: &mut std::time::Instant| {
+-        if debug {
++        if timing {
+             let now = std::time::Instant::now();
+-            eprintln!(
++            debug!(
+                 "  lex {:26} {:>8.2}s",
+                 name,
+                 now.duration_since(*t0).as_secs_f64()
+@@ -248,7 +248,7 @@ impl<'a> LexTableBuilder<'a> {
+             );
+         }
+ 
+-        let debug = std::env::var_os("TS_DEBUG_TIMING").is_some();
++        let timing = log::log_enabled!(log::Level::Debug);
+         let t0 = std::time::Instant::now();
+         let mut max_nfa_states = 0;
+         while let Some(QueueEntry {
+@@ -259,8 +259,8 @@ impl<'a> LexTableBuilder<'a> {
+         {
+             max_nfa_states = max_nfa_states.max(nfa_states.len());
+             self.populate_state(state_id, nfa_states, eof_valid);
+-            if debug && self.table.states.len() % 2000 == 0 {
+-                eprintln!(
++            if timing && self.table.states.len() % 2000 == 0 {
++                debug!(
+                     "    lex states {:6} queue {:6} max_nfa {:5} {:.1}s",
+                     self.table.states.len(),
+                     self.state_queue.len(),
+@@ -269,8 +269,8 @@ impl<'a> LexTableBuilder<'a> {
+                 );
+             }
+         }
+-        if debug {
+-            eprintln!(
++        if timing {
++            debug!(
+                 "  lex state set: tokens {:4} -> states {:6} max_nfa {:5} {:.2}s",
+                 tokens.len(),
+                 self.table.states.len(),
+diff --git a/crates/generate/src/build_tables/build_parse_table.rs b/crates/generate/src/build_tables/build_parse_table.rs
+index 57786c1..20c7544 100644
+--- a/crates/generate/src/build_tables/build_parse_table.rs
++++ b/crates/generate/src/build_tables/build_parse_table.rs
+@@ -2,6 +2,7 @@ use std::{
+     cmp::Ordering,
+     collections::{BTreeMap, BTreeSet, VecDeque},
+     hash::{BuildHasher as _, BuildHasherDefault},
++    io::IsTerminal as _,
+     num::NonZeroU32,
+     time::{Duration, Instant},
+ };
+@@ -680,6 +681,11 @@ impl<'a> ParseTableBuilder<'a> {
+             self.non_terminal_extra_states.push((terminal, state_id));
+         }
+ 
++        // Slow grammars used to fail with no output at all. One line every couple of
++        // seconds tells "working" from "stuck". Only write it to a terminal (or when
++        // debug logging was asked for), so that stderr stays clean in a pipe.
++        let report_progress =
++            std::io::stderr().is_terminal() || log::log_enabled!(log::Level::Debug);
+         let started = Instant::now();
+         let mut last_progress = started;
+         while let Some(entry) = self.parse_state_queue.pop_front() {
+@@ -689,10 +695,7 @@ impl<'a> ParseTableBuilder<'a> {
+                 return Err(ParseTableBuilderError::TooManyStates { max });
+             }
+ 
+-            // Slow grammars used to fail with no output at all. One line every
+-            // couple of seconds is enough to tell "working" from "stuck", and
+-            // costs nothing for grammars that finish quickly.
+-            if last_progress.elapsed() >= Duration::from_secs(2) {
++            if report_progress && last_progress.elapsed() >= Duration::from_secs(2) {
+                 eprintln!(
+                     "  {} parse states, {} queued, {:.1}s ({})",
+                     self.parse_table.states.len(),
+diff --git a/crates/generate/src/build_tables/token_conflicts.rs b/crates/generate/src/build_tables/token_conflicts.rs
+index 12d03f3..f22ad2d 100644
+--- a/crates/generate/src/build_tables/token_conflicts.rs
++++ b/crates/generate/src/build_tables/token_conflicts.rs
+@@ -44,6 +44,20 @@ pub struct TokenConflictMap {
+     pub(crate) row_words: usize,
+ }
+ 
++/// How many threads the conflict matrix is split across for `n` tokens.
++///
++/// Every pair of tokens is analyzed independently, so this is the one part of
++/// table generation that parallelizes trivially. It needs it: the work is
++/// quadratic in the token count, and grammars for real languages have hundreds
++/// of tokens. Small grammars stay single-threaded, where spawning costs more
++/// than the work.
++pub(crate) fn pair_workers(n: usize) -> usize {
++    std::thread::available_parallelism()
++        .map_or(1, std::num::NonZeroUsize::get)
++        .min(n / 16)
++        .max(1)
++}
++
+ impl TokenConflictMap {
+     /// Create a token conflict map based on a lexical grammar, which describes the structure
+     /// of each token, and a `following_token` map, which indicates which tokens may appear
+@@ -65,17 +79,7 @@ impl TokenConflictMap {
+ 
+         let n = grammar.variables.len();
+         let mut status_matrix = vec![TokenConflictStatus::empty(); n * n];
+-        let debug = std::env::var_os("TS_DEBUG_CONFLICTS").is_some();
+-        let debug_start = std::time::Instant::now();
+-
+-        // Every pair of tokens is analyzed independently, so this is the one
+-        // part of table generation that parallelizes trivially. It matters:
+-        // the work is quadratic in the token count, and grammars for real
+-        // languages have hundreds of tokens.
+-        let thread_count = std::thread::available_parallelism()
+-            .map_or(1, std::num::NonZeroUsize::get)
+-            .min(n / 16)
+-            .max(1);
++        let thread_count = pair_workers(n);
+         let mut pair_rows = Vec::with_capacity(n);
+         if thread_count > 1 {
+             let rows = std::thread::scope(|scope| {
+@@ -137,15 +141,6 @@ impl TokenConflictMap {
+                 status_matrix[matrix_index(n, j, i)] = reverse;
+             }
+         }
+-        if debug {
+-            eprintln!(
+-                "conflict matrix: {} tokens, {} threads, {:.2}s",
+-                n,
+-                thread_count,
+-                debug_start.elapsed().as_secs_f64()
+-            );
+-        }
+-
+         // Precompute per-row bitsets for vectorized check_token_conflicts.
+         let row_words = n.div_ceil(64);
+         let conflict_mask = TokenConflictStatus::DOES_MATCH_VALID_CONT
+-- 
+2.55.0
+

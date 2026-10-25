@@ -1,0 +1,55 @@
+// test/fixtures/test_grammars/field_lookup_through_hidden_nodes/grammar.js
+%name field_lookup_through_hidden_nodes;
+%supertypes item;
+%extra /\s/;
+%extra comment;
+%extra _note;
+%extra _tag;
+
+source_file: repeat(choice(
+    list, binding, shadow, sum, aliased, alias_pair, multi, restored,
+    back, maybe, order, skip,
+));
+
+list: '[' optional(_items) ']';
+_items: item repeat(seq(',', item));
+item: name | field(spread, spread);
+spread: '...' name;
+
+aliased: 'alias' alias(item, wrapped) ';';
+alias_pair: 'pair' alias(item, wrapped) ',' item ';';
+
+multi: 'multi' field(outer, _shadowed) field(outer, _binding) ';';
+
+binding: 'let' field(outer, _binding) ';';
+_binding: field(inner, name) '=' name;
+
+shadow: 'shadow' field(outer, _shadowed) ';';
+_shadowed: field(inner, name);
+
+restored: 'restore' field(outer, _restore) ';';
+_restore: field(inner, _restored);
+_restored: field(outer, name);
+
+back: 'back' field(outer, _back) ';';
+_back: _shadowed name;
+
+maybe: 'maybe' field(outer, _maybe) ';';
+_maybe: field(inner, _maybe_inner);
+_maybe_inner: _opt 'end';
+_opt: field(outer, name) | 'none';
+
+order: 'order' field(outer, _order) ';';
+_order: field(zeta, name) field(alpha, name) name;
+
+skip: 'skip' field(outer, _skip) ';';
+_skip: field(inner, _shadowed) field(other, name) name;
+
+sum: 'sum' _sum ';';
+_sum: name | seq(field(left, _sum), '+', name);
+
+name: /[a-z0-9]+/;
+comment: token(seq('//', /.*/));
+
+_note: '@' field(outer, name);
+_tag: '#' name;

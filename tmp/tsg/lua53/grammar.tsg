@@ -1,0 +1,217 @@
+// Lua 5.3, translated from lua53.lemonex (Lemon + integrated lexer).
+//
+// Written in the EBNF surface: `a b` is a sequence, `a | b` an alternation,
+// `x?` / `x*` / `x+` the multipliers, `(…)` groups. `seq()` / `choice()` /
+// `optional()` / `repeat()` are the same constructs spelled as calls and may be
+// mixed freely — both produce the same `grammar.json` — but `prec`, `token` and
+// `field` are function-only, so they appear as calls inside EBNF rules.
+//
+// Translation notes — read these with the source side by side:
+//
+//   * Terminals are inlined as string literals instead of becoming named rules
+//     (Lemon's `PLUS ::= "+"`), which is the tree-sitter idiom and keeps the
+//     tree free of wrapper nodes. The mapping is one-to-one with the names in
+//     the .lemonex file.
+//   * Lemon `%left` / `%right` become `%precedence left|right "level" = …;`
+//     lines, one per level, exactly as in the source: a production takes the
+//     level of its rightmost terminal, so `exp '+' exp` needs no annotation and
+//     operators that share a level (`+` and `-`) share a name. The levels form
+//     one chain, highest first — the opposite of the source's bottom-up order.
+//   * Lemon rule precedence (`stat ::= funccall. [LPAREN]`) marks a *use*, and
+//     so does `@`: `funccall @right(call)` is the same annotation in the same
+//     place. tree-sitter marks definitions, so this is sugar for wrapping the
+//     reference, and `@` is what keeps the 18 call sites readable.
+//   * Empty productions cannot exist in tree-sitter outside the start rule
+//     (`semi`, `statlist`, `scope`, `parlist` in the source), so they become
+//     `x?` / `x*` at the use site — `(…) *` would need the blank, which is `()`.
+//   * `scope`/`binding` only accumulate the list of locals for the semantic
+//     actions. There are no actions here, so they are dropped; `block` states the
+//     same language directly.
+//   * The Flex start conditions LONGCOMMENT / LONGSTRING have no equivalent: a
+//     tree-sitter grammar is scannerless. Long comments and long strings are
+//     single regex tokens instead, which cannot count the `=` signs exactly.
+
+%name lua53;
+%word NAME;
+
+// One level per line, highest first. `= …` lists the terminals that inherit
+// the level, so a production ending in one of them needs no annotation: the
+// table *is* the precedence, as in Lemon and yacc. `call` and `unary` list no
+// terminals because the productions that need them end in a non-terminal
+// (`var args`) or in a terminal owned by a binary level (`-`, `~`); those keep
+// an explicit annotation. This is yacc's own caveat — `%left MINUS` would give
+// unary minus the binary precedence too.
+%precedence right "call";
+%precedence right "pow"     = '^';
+%precedence right "unary";
+%precedence left  "mul"     = '*' '/' '//' '%';
+%precedence left  "add"     = '+' '-';
+%precedence right "concat"  = '..';
+%precedence left  "shift"   = '<<' '>>';
+%precedence left  "band"    = '&';
+%precedence left  "bxor"    = '~';
+%precedence left  "bor"     = '|';
+%precedence left  "compare" = '<' '<=' '>' '>=' '==' '~=';
+%precedence left  "and_"    = 'and';
+%precedence left  "or_"     = 'or';
+
+%extra /\s/;
+%extra comment;
+
+// `{f,}` vs `{f,g}`: whether a `,`/`;` after the last field is the table's
+// trailing separator is not LR(1)-decidable — the source gets away with it
+// because Lemon defers the decision in the automaton, tree-sitter needs GLR.
+%conflicts fieldlist;
+
+// A Lua block may be empty (`do end`, `local f = function() end`). tree-sitter
+// rejects any non-start rule that matches the empty string, so `block` is
+// *guaranteed non-empty* here and every use site says `block?`.
+chunk: block?;
+
+block:
+    (stat ';'?)+ (laststat ';'?)?
+  | laststat ';'?;
+
+stat:
+    'do' block? 'end'
+  | 'if' conds 'end'
+  | 'while' exp 'do' block? 'end'
+  | 'repeat' block? 'until' exp
+  | 'for' NAME '=' explist2 'do' block? 'end'
+  | 'for' namelist 'in' exprlist 'do' block? 'end'
+  | 'function' funcname funcbody
+  | 'goto' NAME
+  | label
+  // The source's `binding`/`scope` rules only differ in how they accumulate
+  // locals for the semantic actions, so the two shapes are spelled out here.
+  | 'local' 'function' NAME funcbody
+  | 'local' namelist ('=' exprlist)?
+  | setlist '=' exprlist
+  | funccall @right(call);
+
+conds: condlist | condlist 'else' block?;
+
+condlist: cond ('elseif' cond)*;
+
+cond: exp 'then' block?;
+
+laststat: 'break' | 'return' | 'return' exprlist;
+
+label: '::' NAME '::';
+
+namelist: NAME (',' NAME)*;
+
+exprlist: exp (',' exp)*;
+
+// `for i = a, b [, c]` needs at least two, at most three expressions.
+explist2: exp ',' exp (',' exp)?;
+
+funcname: dottedname | dottedname ':' NAME;
+
+dottedname: NAME ('.' NAME)*;
+
+exp:
+    'nil'
+  | 'true'
+  | 'false'
+  | INTEGER
+  | FLOAT
+  | STRING
+  | '...'
+  | function
+  | table
+  | var @right(call)
+  | funccall @right(call)
+  | 'not' exp @unary
+  | '#' exp @unary
+  // `not` and `#` inherit `unary` from their rightmost terminal, but `-` and
+  // `~` belong to binary levels, so their unary productions name the level
+  // explicitly: the source's `[NOT]` rule precedence.
+  | '-' exp @unary
+  | '~' exp @unary
+  | exp 'or' exp
+  | exp 'and' exp
+  | exp '<' exp
+  | exp '<=' exp
+  | exp '>' exp
+  | exp '>=' exp
+  | exp '==' exp
+  | exp '~=' exp
+  | exp '|' exp
+  | exp '~' exp
+  | exp '&' exp
+  | exp '<<' exp
+  | exp '>>' exp
+  | exp '..' exp
+  | exp '+' exp
+  | exp '-' exp
+  | exp '*' exp
+  | exp '/' exp
+  | exp '//' exp
+  | exp '%' exp
+  | exp '^' exp
+  | '(' exp ')' @right(call);
+
+setlist: var (',' var)*;
+
+var:
+    NAME
+  | var '[' exp ']' @right(call)
+  | var '.' NAME @right(call)
+  | funccall '[' exp ']' @right(call)
+  | funccall '.' NAME @right(call)
+  | '(' exp ')' '[' exp ']' @right(call)
+  | '(' exp ')' '.' NAME @right(call);
+
+funccall:
+    var args @right(call)
+  | var ':' NAME args @right(call)
+  | funccall args @right(call)
+  | funccall ':' NAME args @right(call)
+  | '(' exp ')' args @right(call)
+  | '(' exp ')' ':' NAME args @right(call);
+
+args: '(' exprlist? ')' | table | STRING;
+
+function: 'function' funcbody;
+
+funcbody: params block? 'end';
+
+// Same empty-production problem as `block`: `()` is a valid parameter list.
+params: '(' parlist? ')';
+
+// `parlist ::= namelist | namelist ',' DOTS | DOTS` is lookahead-2 (`, NAME` vs
+// `, DOTS`), which is why it forks the parser. Treating `...` as just another
+// list item makes it uniform — at the cost of accepting `(..., a)`, which the
+// source does not (and which would need an external scanner to reject).
+parlist: (NAME | '...') (',' (NAME | '...'))*;
+
+table: '{' (fieldlist (',' | ';')?)? '}';
+
+// `field` is also a DSL function name, so the rule reference is `$field`: a bare
+// `field (` would read as `field(name, rule)`. tsg warns about the collision.
+fieldlist: $field ((',' | ';') $field)*;
+
+field:
+    exp
+  | NAME '=' exp
+  | '[' exp ']' '=' exp;
+
+// ------------------------------- tokens ---------------------------------
+
+// `--[[ … ]]` is a long comment; everything else after `--` runs to the end of
+// the line. The source needs two lexer modes for this; one token is enough.
+tokens {
+    comment: /--(\[=*\[(.|\n)*\]=*\]|[^\n]*)/;
+}
+
+NAME: /[a-zA-Z_][a-zA-Z_0-9]*/;
+
+INTEGER: /[0-9]+|0[xX][0-9a-fA-F]+/;
+
+FLOAT: /[0-9]+\.[0-9]*([eE][+-]?[0-9]+)?/;
+
+// One pattern, not `choice(token(…), token(…))`: `parser.c` behaves differently
+// for the two spellings. The choice form silently inserts a zero-width `STRING`
+// where the single pattern correctly reports `MISSING` (see DOGFOODING.md).
+STRING: /"(\\.|[^"\\\n])*"|'(\\.|[^'\\\n])*'|\[=*\[(.|\n)*\]=*\]/;

@@ -1,0 +1,7 @@
+%extras none;
+
+file: _a;
+
+_a: _b;
+_b: _c;
+_c: _a;

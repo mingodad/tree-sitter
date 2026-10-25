@@ -1,0 +1,5 @@
+// test/fixtures/test_grammars/eof_basic/grammar.js
+%name eof_basic;
+
+source_file: repeat(line);
+line: 'text' '\n' | 'text' eof();

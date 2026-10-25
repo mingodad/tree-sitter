@@ -1,0 +1,885 @@
+// SQLite SQL grammar, translated from sqlite3.lemonex (Lemon + integrated lexer).
+//
+// Translation notes — read these with the source side by side:
+//
+//   * Lemon terminals stay named tokens (the `tokens { … }` block), so each
+//     rule below reads like the Lemon production.  Keyword tokens are
+//     case-insensitive regexes because the source begins with
+//     `%lexer_caseless`; `ID` is the `%word` token.
+//   * Lemon takes a rule's precedence from its *first* terminal.  tsg's
+//     `%precedence` table uses the rightmost terminal (yacc's rule), so a
+//     production whose two answers differ carries an explicit
+//     `@left(level)`/`@right(level)` (or plain `@level` when the level
+//     has no associativity); `@0` suppresses a terminal Lemon ignores.
+//   * Empty Lemon productions cannot exist as non-start rules in
+//     tree-sitter.  They are folded into the use sites as `x?`; rules that
+//     were only `?` markers in the source (`scanpt`, `scantok`) disappear.
+//   * `%wildcard ANY` becomes the `ANY` token; `QNUMBER` has no lexer rule
+//     in the source and its single `term` production is omitted.
+//   * The source's `%fallback ID` is the contextual keyword behaviour of
+//     `%word ID`: a keyword token is only in the lexer mode of a state that
+//     expects it, and `ID` is accepted where an identifier is expected.
+
+%name sqlite3;
+%word ID;
+
+tokens {
+  WS: /[ \t\n\r]+/;
+  LINE_COMMENT: /--.*/;
+  BLOCK_COMMENT: /\/\*([^*]|\*+[^*\/])*\*+\//;
+  ABORT: /ABORT/i;
+  ACTION: /ACTION/i;
+  ADD: /ADD/i;
+  AFTER: /AFTER/i;
+  ALL: /ALL/i;
+  ALTER: /ALTER/i;
+  ALWAYS: /ALWAYS/i;
+  ANALYZE: /ANALYZE/i;
+  AND: /AND/i;
+  AS: /AS/i;
+  ASC: /ASC/i;
+  ATTACH: /ATTACH/i;
+  AUTOINCR: /AUTOINCREMENT/i;
+  BEFORE: /BEFORE/i;
+  BEGIN: /BEGIN/i;
+  BETWEEN: /BETWEEN/i;
+  BITAND: '&';
+  BITNOT: '~';
+  BITOR: '|';
+  BLOB: /[xX]'[0-9a-fA-F]*'/;
+  BY: /BY/i;
+  CASCADE: /CASCADE/i;
+  CASE: /CASE/i;
+  CAST: /CAST/i;
+  CHECK: /CHECK/i;
+  COLLATE: /COLLATE/i;
+  COLUMNKW: /COLUMN/i;
+  COMMA: ',';
+  COMMIT: /COMMIT/i;
+  CONCAT: '||';
+  CONFLICT: /CONFLICT/i;
+  CONSTRAINT: /CONSTRAINT/i;
+  CREATE: /CREATE/i;
+  CTIME_KW: /CURRENT_DATE|CURRENT_TIME|CURRENT_TIMESTAMP/i;
+  CURRENT: /CURRENT/i;
+  DATABASE: /DATABASE/i;
+  DEFAULT: /DEFAULT/i;
+  DEFERRABLE: /DEFERRABLE/i;
+  DEFERRED: /DEFERRED/i;
+  DELETE: /DELETE/i;
+  DESC: /DESC/i;
+  DETACH: /DETACH/i;
+  DISTINCT: /DISTINCT/i;
+  DO: /DO/i;
+  DOT: '.';
+  DROP: /DROP/i;
+  EACH: /EACH/i;
+  ELSE: /ELSE/i;
+  END: /END/i;
+  EQ: '=';
+  ESCAPE: /ESCAPE/i;
+  EXCEPT: /EXCEPT/i;
+  EXCLUDE: /EXCLUDE/i;
+  EXCLUSIVE: /EXCLUSIVE/i;
+  EXISTS: /EXISTS/i;
+  EXPLAIN: /EXPLAIN/i;
+  FAIL: /FAIL/i;
+  FILTER: /FILTER/i;
+  FIRST: /FIRST/i;
+  FOLLOWING: /FOLLOWING/i;
+  FOR: /FOR/i;
+  FOREIGN: /FOREIGN/i;
+  FROM: /FROM/i;
+  GE: '>=';
+  GENERATED: /GENERATED/i;
+  GROUP: /GROUP/i;
+  GROUPS: /GROUPS/i;
+  GT: '>';
+  HAVING: /HAVING/i;
+  IF: /IF/i;
+  IGNORE: /IGNORE/i;
+  IMMEDIATE: /IMMEDIATE/i;
+  IN: /IN/i;
+  INDEX: /INDEX/i;
+  INDEXED: /INDEXED/i;
+  INITIALLY: /INITIALLY/i;
+  INSERT: /INSERT/i;
+  INSTEAD: /INSTEAD/i;
+  INTERSECT: /INTERSECT/i;
+  INTO: /INTO/i;
+  IS: /IS/i;
+  ISNULL: /ISNULL/i;
+  JOIN: /JOIN/i;
+  JOIN_KW: /CROSS|FULL|INNER|LEFT|NATURAL|OUTER|RIGHT/i;
+  KEY: /KEY/i;
+  LAST: /LAST/i;
+  LE: '<=';
+  LIKE_KW: /LIKE|GLOB|REGEXP/i;
+  LIMIT: /LIMIT/i;
+  LP: '(';
+  LSHIFT: '<<';
+  LT: '<';
+  MATCH: /MATCH/i;
+  MATERIALIZED: /MATERIALIZED/i;
+  MINUS: '-';
+  NE: /<>|!=/;
+  NO: /NO/i;
+  NOT: /NOT/i;
+  NOTHING: /NOTHING/i;
+  NOTNULL: /NOTNULL/i;
+  NULL: /NULL/i;
+  NULLS: /NULLS/i;
+  OF: /OF/i;
+  OFFSET: /OFFSET/i;
+  ON: /ON/i;
+  OR: /OR/i;
+  ORDER: /ORDER/i;
+  OTHERS: /OTHERS/i;
+  OVER: /OVER/i;
+  PARTITION: /PARTITION/i;
+  PLAN: /PLAN/i;
+  PLUS: '+';
+  PRAGMA: /PRAGMA/i;
+  PRECEDING: /PRECEDING/i;
+  PRIMARY: /PRIMARY/i;
+  PTR: '->';
+  QUERY: /QUERY/i;
+  RAISE: /RAISE/i;
+  RANGE: /RANGE/i;
+  RECURSIVE: /RECURSIVE/i;
+  REFERENCES: /REFERENCES/i;
+  REINDEX: /REINDEX/i;
+  RELEASE: /RELEASE/i;
+  REM: '%';
+  RENAME: /RENAME/i;
+  REPLACE: /REPLACE/i;
+  RESTRICT: /RESTRICT/i;
+  RETURNING: /RETURNING/i;
+  ROLLBACK: /ROLLBACK/i;
+  ROW: /ROW/i;
+  ROWS: /ROWS/i;
+  RP: ')';
+  RSHIFT: '>>';
+  SAVEPOINT: /SAVEPOINT/i;
+  SELECT: /SELECT/i;
+  SEMI: ';';
+  SET: /SET/i;
+  SLASH: '/';
+  STAR: '*';
+  TABLE: /TABLE/i;
+  TEMP: /TEMP/i;
+  THEN: /THEN/i;
+  TIES: /TIES/i;
+  TO: /TO/i;
+  TRANSACTION: /TRANSACTION/i;
+  TRIGGER: /TRIGGER/i;
+  UNBOUNDED: /UNBOUNDED/i;
+  UNION: /UNION/i;
+  UNIQUE: /UNIQUE/i;
+  UPDATE: /UPDATE/i;
+  USING: /USING/i;
+  VACUUM: /VACUUM/i;
+  VALUES: /VALUES/i;
+  VARIABLE: /\?[0-9]*|[:@][_a-zA-Z0-9]+|\$[_a-zA-Z0-9]*/;
+  VIEW: /VIEW/i;
+  VIRTUAL: /VIRTUAL/i;
+  WHEN: /WHEN/i;
+  WHERE: /WHERE/i;
+  WINDOW: /WINDOW/i;
+  WITH: /WITH/i;
+  WITHOUT: /WITHOUT/i;
+  FLOAT: /([0-9]+\.[0-9]*|\.[0-9]+)([Ee](\+|\-)?[0-9]+)?/;
+  INTEGER: /[0-9]+/;
+  STRING: /'(''|[^'\n])*'/;
+  ID: /[_a-zA-Z][a-zA-Z0-9_]*|\"[_a-zA-Z][a-zA-Z0-9_]*\"/;
+  ANY: /[^\s,()]+/;
+}
+
+%extra WS;
+%extra LINE_COMMENT;
+%extra BLOCK_COMMENT;
+
+// One level per line, highest first (the source lists them lowest first).
+// `ON` is `%nonassoc` in Lemon; tree-sitter has no non-associative
+// precedence, so it is a level with no associativity.
+%precedence "on" = ON;
+%precedence right "bitnot" = BITNOT;
+%precedence left "collate" = COLLATE;
+%precedence left "concat" = CONCAT PTR;
+%precedence left "mul" = STAR SLASH REM;
+%precedence left "add" = PLUS MINUS;
+%precedence left "bit" = BITAND BITOR LSHIFT RSHIFT;
+%precedence right "escape" = ESCAPE;
+%precedence left "rel" = GT LE LT GE;
+%precedence left "compare" = IS MATCH LIKE_KW BETWEEN IN ISNULL NOTNULL NE EQ;
+%precedence right "not" = NOT;
+%precedence left "and" = AND;
+%precedence left "or" = OR;
+
+// One GLR split: the optional ON/USING after a table reference.
+%conflicts seltablist;
+
+// The first rule outside `tokens` is the start rule.
+input: cmdlist;
+
+explain:
+    EXPLAIN
+  | EXPLAIN QUERY PLAN;
+
+cmdx:
+    cmd;
+
+cmd:
+    BEGIN transtype? trans_opt?
+  | COMMIT trans_opt?
+  | END trans_opt?
+  | ROLLBACK trans_opt?
+  | SAVEPOINT nm
+  | RELEASE savepoint_opt? nm
+  | ROLLBACK trans_opt? TO savepoint_opt? nm
+  | DROP TABLE ifexists? fullname
+  | createkw temp? VIEW ifnotexists? nm dbnm? eidlist_opt? AS select
+  | DROP VIEW ifexists? fullname
+  | select
+  | with? DELETE FROM xfullname indexed_opt? where_opt_ret?
+  | with? UPDATE orconf? xfullname indexed_opt? SET setlist from? where_opt_ret?
+  | with? insert_cmd INTO xfullname idlist_opt? select upsert?
+  | with? insert_cmd INTO xfullname idlist_opt? DEFAULT VALUES returning?
+  | createkw uniqueflag? INDEX ifnotexists? nm dbnm? ON nm LP sortlist RP where_opt? @on
+  | DROP INDEX ifexists? fullname
+  | VACUUM vinto?
+  | VACUUM nm vinto?
+  | PRAGMA nm dbnm?
+  | PRAGMA nm dbnm? EQ nmnum
+  | PRAGMA nm dbnm? LP nmnum RP
+  | PRAGMA nm dbnm? EQ minus_num
+  | PRAGMA nm dbnm? LP minus_num RP
+  | createkw trigger_decl BEGIN trigger_cmd_list END
+  | DROP TRIGGER ifexists? fullname
+  | ATTACH database_kw_opt? expr AS expr key_opt?
+  | DETACH database_kw_opt? expr
+  | REINDEX
+  | REINDEX nm dbnm?
+  | ANALYZE
+  | ANALYZE nm dbnm?
+  | ALTER TABLE fullname RENAME TO nm
+  | alter_add carglist?
+  | ALTER TABLE fullname DROP kwcolumn_opt? nm
+  | ALTER TABLE fullname RENAME kwcolumn_opt? nm TO nm
+  | ALTER TABLE fullname DROP CONSTRAINT nm
+  | ALTER TABLE fullname ALTER kwcolumn_opt? nm DROP NOT NULL @right(not)
+  | ALTER TABLE fullname ALTER kwcolumn_opt? nm SET NOT NULL onconf? @right(not)
+  | ALTER TABLE fullname ADD CONSTRAINT nm CHECK LP expr RP onconf?
+  | ALTER TABLE fullname ADD CHECK LP expr RP onconf?
+  | create_vtab
+  | create_vtab LP vtabarglist? RP
+  | create_table create_table_args;
+
+transtype:
+    DEFERRED
+  | IMMEDIATE
+  | EXCLUSIVE;
+
+create_table:
+    createkw temp? TABLE ifnotexists? nm dbnm?;
+
+createkw:
+    CREATE;
+
+ifnotexists:
+    IF NOT EXISTS @right(not);
+
+temp:
+    TEMP;
+
+create_table_args:
+    LP columnlist conslist_opt? RP table_option_set?
+  | AS select;
+
+table_option_set:
+    table_option_set COMMA table_option
+  | table_option;
+
+table_option:
+    WITHOUT nm
+  | nm;
+
+columnname:
+    nm typetoken?;
+
+typetoken:
+    typename LP signed RP
+  | typename LP signed COMMA signed RP
+  | typename;
+
+typename:
+    typename ID
+  | typename STRING
+  | ID
+  | STRING;
+
+ccons:
+    CONSTRAINT nm
+  | DEFAULT term
+  | DEFAULT LP expr RP
+  | DEFAULT PLUS term
+  | DEFAULT MINUS term
+  | DEFAULT ID
+  | DEFAULT INDEXED
+  | NOT NULL onconf? @right(not)
+  | PRIMARY KEY sortorder? onconf? autoinc?
+  | UNIQUE onconf?
+  | CHECK LP expr RP
+  | REFERENCES nm eidlist_opt? refargs?
+  | defer_subclause
+  | COLLATE ID @left(collate)
+  | COLLATE STRING @left(collate)
+  | NULL onconf?
+  | GENERATED ALWAYS AS generated
+  | AS generated;
+
+generated:
+    LP expr RP
+  | LP expr RP ID;
+
+autoinc:
+    AUTOINCR;
+
+refargs:
+    refargs refarg
+  | refarg;
+
+refarg:
+    MATCH nm
+  | ON INSERT refact @on
+  | ON DELETE refact @on
+  | ON UPDATE refact @on;
+
+refact:
+    SET NULL
+  | SET DEFAULT
+  | CASCADE
+  | RESTRICT
+  | NO ACTION;
+
+defer_subclause:
+    NOT DEFERRABLE init_deferred_pred_opt? @right(not)
+  | DEFERRABLE init_deferred_pred_opt?;
+
+init_deferred_pred_opt:
+    INITIALLY DEFERRED
+  | INITIALLY IMMEDIATE;
+
+conslist_opt:
+    COMMA conslist;
+
+tconscomma:
+    COMMA;
+
+tcons:
+    CONSTRAINT nm
+  | PRIMARY KEY LP sortlist autoinc? RP onconf?
+  | UNIQUE LP sortlist RP onconf?
+  | CHECK LP expr RP onconf?
+  | FOREIGN KEY LP eidlist RP REFERENCES nm eidlist_opt? refargs? defer_subclause_opt?;
+
+defer_subclause_opt:
+    defer_subclause;
+
+onconf:
+    ON CONFLICT resolvetype @on;
+
+orconf:
+    OR resolvetype;
+
+resolvetype:
+    IGNORE
+  | REPLACE
+  | raisetype;
+
+ifexists:
+    IF EXISTS;
+
+select:
+    WITH wqlist selectnowith
+  | WITH RECURSIVE wqlist selectnowith
+  | selectnowith;
+
+selectnowith:
+    selectnowith multiselect_op oneselect
+  | oneselect;
+
+multiselect_op:
+    UNION
+  | UNION ALL
+  | EXCEPT
+  | INTERSECT;
+
+oneselect:
+    SELECT distinct? selcollist from? where_opt? groupby_opt? having_opt? orderby_opt? limit_opt?
+  | SELECT distinct? selcollist from? where_opt? groupby_opt? having_opt? window_clause orderby_opt? limit_opt?
+  | mvalues
+  | values;
+
+values:
+    VALUES LP nexprlist RP;
+
+mvalues:
+    values COMMA LP nexprlist RP
+  | mvalues COMMA LP nexprlist RP;
+
+distinct:
+    DISTINCT
+  | ALL;
+
+sclp:
+    selcollist COMMA;
+
+selcollist:
+    (expr as? | STAR | nm DOT STAR) (COMMA (expr as? | STAR | nm DOT STAR))*;
+
+as:
+    AS nm
+  | ID
+  | STRING;
+
+from:
+    FROM seltablist;
+
+stl_prefix:
+    seltablist joinop;
+
+seltablist:
+    stl_prefix? nm dbnm? as? on_using?
+  | stl_prefix? nm dbnm? as? indexed_by on_using?
+  | stl_prefix? nm dbnm? LP exprlist? RP as? on_using?
+  | stl_prefix? LP select RP as? on_using?
+  | stl_prefix? LP seltablist RP as? on_using?;
+
+dbnm:
+    DOT nm;
+
+fullname:
+    nm
+  | nm DOT nm;
+
+xfullname:
+    nm
+  | nm DOT nm
+  | nm AS nm
+  | nm DOT nm AS nm;
+
+joinop:
+    COMMA
+  | JOIN
+  | JOIN_KW JOIN
+  | JOIN_KW nm JOIN
+  | JOIN_KW nm nm JOIN;
+
+on_using:
+    ON expr
+  | USING LP idlist RP;
+
+indexed_opt:
+    indexed_by;
+
+indexed_by:
+    INDEXED BY nm
+  | NOT INDEXED @right(not);
+
+orderby_opt:
+    ORDER BY sortlist;
+
+sortlist:
+    sortlist COMMA expr sortorder? nulls?
+  | expr sortorder? nulls?;
+
+sortorder:
+    ASC
+  | DESC;
+
+nulls:
+    NULLS FIRST
+  | NULLS LAST;
+
+groupby_opt:
+    GROUP BY nexprlist;
+
+having_opt:
+    HAVING expr;
+
+limit_opt:
+    LIMIT expr
+  | LIMIT expr OFFSET expr
+  | LIMIT expr COMMA expr;
+
+where_opt:
+    WHERE expr;
+
+where_opt_ret:
+    WHERE expr
+  | RETURNING selcollist
+  | WHERE expr RETURNING selcollist;
+
+setlist:
+    setlist COMMA nm EQ expr
+  | setlist COMMA LP idlist RP EQ expr
+  | nm EQ expr
+  | LP idlist RP EQ expr;
+
+upsert:
+    RETURNING selcollist
+  | ON CONFLICT LP sortlist RP where_opt? DO UPDATE SET setlist where_opt? upsert? @on
+  | ON CONFLICT LP sortlist RP where_opt? DO NOTHING upsert? @on
+  | ON CONFLICT DO NOTHING returning? @on
+  | ON CONFLICT DO UPDATE SET setlist where_opt? returning? @on;
+
+returning:
+    RETURNING selcollist;
+
+insert_cmd:
+    INSERT orconf?
+  | REPLACE;
+
+idlist_opt:
+    LP idlist RP;
+
+idlist:
+    idlist COMMA nm
+  | nm;
+
+expr:
+    LP expr RP
+  | ID
+  | INDEXED
+  | JOIN_KW
+  | nm DOT nm
+  | nm DOT nm DOT nm
+  | VARIABLE
+  | expr COLLATE ID @left(collate)
+  | expr COLLATE STRING @left(collate)
+  | CAST LP expr AS typetoken? RP
+  | ID LP distinct? exprlist? RP
+  | INDEXED LP distinct? exprlist? RP
+  | JOIN_KW LP distinct? exprlist? RP
+  | ID LP distinct? exprlist? ORDER BY sortlist RP
+  | INDEXED LP distinct? exprlist? ORDER BY sortlist RP
+  | JOIN_KW LP distinct? exprlist? ORDER BY sortlist RP
+  | ID LP STAR RP @left(mul)
+  | INDEXED LP STAR RP @left(mul)
+  | JOIN_KW LP STAR RP @left(mul)
+  | ID LP distinct? exprlist? RP filter_over
+  | INDEXED LP distinct? exprlist? RP filter_over
+  | JOIN_KW LP distinct? exprlist? RP filter_over
+  | ID LP distinct? exprlist? ORDER BY sortlist RP filter_over
+  | INDEXED LP distinct? exprlist? ORDER BY sortlist RP filter_over
+  | JOIN_KW LP distinct? exprlist? ORDER BY sortlist RP filter_over
+  | ID LP STAR RP filter_over @left(mul)
+  | INDEXED LP STAR RP filter_over @left(mul)
+  | JOIN_KW LP STAR RP filter_over @left(mul)
+  | LP nexprlist COMMA expr RP
+  | expr AND expr
+  | expr OR expr
+  | expr LT expr
+  | expr GT expr
+  | expr GE expr
+  | expr LE expr
+  | expr EQ expr
+  | expr NE expr
+  | expr BITAND expr
+  | expr BITOR expr
+  | expr LSHIFT expr
+  | expr RSHIFT expr
+  | expr PLUS expr
+  | expr MINUS expr
+  | expr STAR expr
+  | expr SLASH expr
+  | expr REM expr
+  | expr CONCAT expr
+  | expr likeop expr @left(compare)
+  | expr likeop expr ESCAPE expr @left(compare)
+  | expr ISNULL
+  | expr NOTNULL
+  | expr NOT NULL @right(not)
+  | expr IS expr
+  | expr IS NOT expr @left(compare)
+  | expr IS NOT DISTINCT FROM expr @left(compare)
+  | expr IS DISTINCT FROM expr @left(compare)
+  | NOT expr
+  | BITNOT expr
+  | PLUS expr @right(bitnot)
+  | MINUS expr @right(bitnot)
+  | expr PTR expr
+  | expr between_op expr AND expr @left(compare)
+  | expr in_op LP exprlist? RP @left(compare)
+  | LP select RP
+  | expr in_op LP select RP @left(compare)
+  | expr in_op nm dbnm? paren_exprlist? @left(compare)
+  | EXISTS LP select RP
+  | CASE case_operand? case_exprlist case_else? END
+  | RAISE LP IGNORE RP
+  | RAISE LP raisetype COMMA expr RP
+  | term;
+
+term:
+    NULL
+  | FLOAT
+  | BLOB
+  | STRING
+  | INTEGER
+  | CTIME_KW;
+
+likeop:
+    NOT LIKE_KW @right(not)
+  | NOT MATCH @right(not)
+  | LIKE_KW
+  | MATCH;
+
+between_op:
+    BETWEEN
+  | NOT BETWEEN @right(not);
+
+in_op:
+    IN
+  | NOT IN @right(not);
+
+case_exprlist:
+    case_exprlist WHEN expr THEN expr
+  | WHEN expr THEN expr;
+
+case_else:
+    ELSE expr;
+
+case_operand:
+    expr;
+
+exprlist:
+    nexprlist;
+
+nexprlist:
+    nexprlist COMMA expr
+  | expr;
+
+paren_exprlist:
+    LP exprlist? RP;
+
+uniqueflag:
+    UNIQUE;
+
+eidlist_opt:
+    LP eidlist RP;
+
+eidlist:
+    eidlist COMMA nm collate? sortorder?
+  | nm collate? sortorder?;
+
+collate:
+    COLLATE ID @left(collate)
+  | COLLATE STRING @left(collate);
+
+vinto:
+    INTO expr;
+
+plus_num:
+    PLUS INTEGER @left(add)
+  | PLUS FLOAT @left(add)
+  | INTEGER
+  | FLOAT;
+
+minus_num:
+    MINUS INTEGER @left(add)
+  | MINUS FLOAT @left(add);
+
+trigger_decl:
+    temp? TRIGGER ifnotexists? nm dbnm? trigger_time? trigger_event ON fullname foreach_clause? when_clause?;
+
+trigger_time:
+    BEFORE
+  | AFTER
+  | INSTEAD OF;
+
+trigger_event:
+    DELETE
+  | INSERT
+  | UPDATE
+  | UPDATE OF idlist;
+
+when_clause:
+    WHEN expr;
+
+trigger_cmd_list:
+    trigger_cmd_list trigger_cmd SEMI
+  | trigger_cmd SEMI;
+
+tridxby:
+    INDEXED BY nm
+  | NOT INDEXED @right(not);
+
+trigger_cmd:
+    UPDATE orconf? xfullname tridxby? SET setlist from? where_opt?
+  | insert_cmd INTO xfullname idlist_opt? select upsert?
+  | DELETE FROM xfullname tridxby? where_opt?
+  | select;
+
+raisetype:
+    ROLLBACK
+  | ABORT
+  | FAIL;
+
+key_opt:
+    KEY expr;
+
+alter_add:
+    ALTER TABLE fullname ADD kwcolumn_opt? nm typetoken?;
+
+create_vtab:
+    createkw VIRTUAL TABLE ifnotexists? nm dbnm? USING nm;
+
+vtabarg:
+    vtabargtoken+;
+
+vtabargtoken:
+    ANY
+  | lp anylist? RP;
+
+lp:
+    LP;
+
+with:
+    WITH wqlist
+  | WITH RECURSIVE wqlist;
+
+wqas:
+    AS
+  | AS MATERIALIZED
+  | AS NOT MATERIALIZED @right(not);
+
+wqitem:
+    withnm eidlist_opt? wqas LP select RP;
+
+withnm:
+    nm;
+
+wqlist:
+    wqitem
+  | wqlist COMMA wqitem;
+
+windowdefn_list:
+    windowdefn_list COMMA windowdefn
+  | windowdefn;
+
+windowdefn:
+    nm AS LP window? RP;
+
+window:
+    PARTITION BY nexprlist orderby_opt? frame_opt?
+  | nm PARTITION BY nexprlist orderby_opt? frame_opt?
+  | ORDER BY sortlist frame_opt?
+  | nm ORDER BY sortlist frame_opt?
+  | nm frame_opt?;
+
+frame_opt:
+    range_or_rows frame_bound_s frame_exclude_opt?
+  | range_or_rows BETWEEN frame_bound_s AND frame_bound_e frame_exclude_opt? @left(compare);
+
+range_or_rows:
+    RANGE
+  | ROWS
+  | GROUPS;
+
+frame_bound_s:
+    frame_bound
+  | UNBOUNDED PRECEDING;
+
+frame_bound_e:
+    frame_bound
+  | UNBOUNDED FOLLOWING;
+
+frame_bound:
+    expr PRECEDING
+  | expr FOLLOWING
+  | CURRENT ROW;
+
+frame_exclude_opt:
+    EXCLUDE frame_exclude;
+
+frame_exclude:
+    NO OTHERS
+  | CURRENT ROW
+  | GROUP
+  | TIES;
+
+window_clause:
+    WINDOW windowdefn_list;
+
+filter_over:
+    filter_clause over_clause
+  | over_clause
+  | filter_clause;
+
+over_clause:
+    OVER LP window? RP
+  | OVER nm;
+
+filter_clause:
+    FILTER LP WHERE expr RP;
+
+cmdlist:
+    cmdlist ecmd
+  | ecmd;
+
+ecmd:
+    SEMI
+  | cmdx SEMI
+  | explain cmdx SEMI;
+
+trans_opt:
+    TRANSACTION
+  | TRANSACTION nm;
+
+savepoint_opt:
+    SAVEPOINT;
+
+columnlist:
+    columnlist COMMA columnname carglist?
+  | columnname carglist?;
+
+nm:
+    ID
+  | INDEXED
+  | JOIN_KW
+  | STRING;
+
+signed:
+    plus_num
+  | minus_num;
+
+carglist:
+    carglist ccons
+  | ccons;
+
+conslist:
+    conslist tconscomma? tcons
+  | tcons;
+
+nmnum:
+    plus_num
+  | nm
+  | ON
+  | DELETE
+  | DEFAULT;
+
+foreach_clause:
+    FOR EACH ROW;
+
+database_kw_opt:
+    DATABASE;
+
+kwcolumn_opt:
+    COLUMNKW;
+
+vtabarglist:
+    vtabarg (COMMA vtabarg)*;
+
+anylist:
+    (ANY | LP anylist? RP)+;

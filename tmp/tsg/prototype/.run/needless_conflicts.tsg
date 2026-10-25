@@ -1,0 +1,4 @@
+%conflicts expr;
+
+file: expr;
+expr: "x" | "y";

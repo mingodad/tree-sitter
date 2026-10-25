@@ -1,0 +1,10 @@
+// test/fixtures/test_grammars/external_word_token/grammar.js
+%name external_word_token;
+%external identifier;
+%word identifier;
+
+program: repeat(_item);
+label_name: /[a-z]+/;
+_item: let_statement | label;
+let_statement: 'let' identifier '=' identifier ';';
+label: '@' label_name;

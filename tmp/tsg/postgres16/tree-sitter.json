@@ -1,0 +1,17 @@
+{
+  "grammars": [
+    {
+      "name": "postgres",
+      "camelcase": "Postgres",
+      "scope": "source.postgres",
+      "path": ".",
+      "file-types": ["sql"]
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "MIT",
+    "description": "PostgreSQL 16 SQL, translated from postgres16.g",
+    "links": { "repository": "https://example.invalid/postgres16" }
+  }
+}

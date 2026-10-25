@@ -1,0 +1,278 @@
+From 01b14638d1699bbc93b3a08283e3010d9a25e50f Mon Sep 17 00:00:00 2001
+From: Domingo Alvarez Duarte <mingo@Domingos-MacBook-Air.local>
+Date: Sun, 25 Oct 2026 13:43:26 +0100
+Subject: [PATCH 7/8] feat(generate): report every unresolved conflict, not
+ just the first
+
+`handle_conflict` returned the first conflict it found as an error, so a
+grammar with n independent conflicts took n `generate` runs to triage, one
+pair per run, with no way to see what was still hiding behind the first
+one. A grammar ported from bison hits this immediately: its conflicts come
+from the port, not from the original grammar, so there are usually several
+at once.
+
+Collect them instead. A conflict that the grammar does not declare is
+recorded, the state keeps both actions as if the conflict had been
+declared, and state building continues; the tables are discarded either
+way, and carrying on is what reaches the states behind the one that
+conflicted. Conflicts are deduplicated by symbol set, so a pair is
+reported once however many states run into it.
+
+The report for a single conflict is unchanged: the item sets and the
+precedence that would resolve it are what an author needs. With several,
+the message summarizes: one line per conflict, with the `conflicts` entry
+it needs. `--json-summary` still returns the full item sets.
+
+For the PostgreSQL 16 grammar, this turned 12 sequential runs into one
+0.4 s run that lists all 12 conflicts.
+---
+ .../src/build_tables/build_parse_table.rs     |  66 ++++++++++-
+ crates/generate/src/generate.rs               | 105 ++++++++++++++++++
+ docs/src/cli/generate.md                      |   4 +
+ 3 files changed, 173 insertions(+), 2 deletions(-)
+
+diff --git a/crates/generate/src/build_tables/build_parse_table.rs b/crates/generate/src/build_tables/build_parse_table.rs
+index 20c7544..c8ae433 100644
+--- a/crates/generate/src/build_tables/build_parse_table.rs
++++ b/crates/generate/src/build_tables/build_parse_table.rs
+@@ -350,6 +350,12 @@ struct ParseTableBuilder<'a> {
+     auxiliary_contexts: AuxiliarySymbolContexts,
+     non_terminal_extra_states: Vec<(Symbol, ParseStateId)>,
+     actual_conflicts: FxHashSet<Vec<Symbol>>,
++    /// Conflicts that the grammar does not declare, collected instead of aborting at
++    /// the first one.
++    unresolved_conflicts: Vec<ConflictError>,
++    /// Symbol sets already in `unresolved_conflicts`, so a pair is reported once no
++    /// matter how many states run into it.
++    unresolved_conflict_keys: FxHashSet<Vec<Symbol>>,
+     parse_table: ParseTable,
+     /// The pool index of each action list interned into `parse_table` so far.
+     action_list_ids: FxHashMap<ActionList, u32>,
+@@ -370,6 +376,8 @@ pub type BuildTableResult<T> = Result<T, ParseTableBuilderError>;
+ pub enum ParseTableBuilderError {
+     #[error("Unresolved conflict for symbol sequence:\n\n{0}")]
+     Conflict(Box<ConflictError>),
++    #[error("{}", display_conflicts(.0))]
++    Conflicts(Vec<ConflictError>),
+     #[error("Extra rules must have unambiguous endings. Conflicting rules: {0}")]
+     AmbiguousExtra(#[from] AmbiguousExtraError),
+     #[error(
+@@ -393,6 +401,48 @@ impl From<ConflictError> for ParseTableBuilderError {
+     }
+ }
+ 
++fn display_conflicts(errors: &[ConflictError]) -> String {
++    // One conflict keeps the detailed report, which explains the item sets and the
++    // precedence/associativity that would resolve it. Several at once get a summary:
++    // a grammar ported from yacc can produce a dozen of them, and each conflict can
++    // have hundreds of interpretations, which nobody reads in one message.
++    let [error] = errors else {
++        let mut message = format!(
++            "Unresolved conflicts for {} symbol sequences. Each one needs a `conflicts` \
++             entry, or a precedence that resolves it:",
++            errors.len(),
++        );
++        for (i, error) in errors.iter().enumerate() {
++            let mut sequence = error
++                .symbol_sequence
++                .iter()
++                .map(|symbol| format!("{symbol} "))
++                .collect::<String>();
++            sequence.push_str("•  ");
++            sequence.push_str(&error.conflicting_lookahead);
++            sequence.push_str("  …");
++            let rules = error
++                .possible_resolutions
++                .iter()
++                .find_map(|resolution| match resolution {
++                    Resolution::AddConflict { symbols } => Some(
++                        symbols
++                            .iter()
++                            .map(|symbol| format!("`{symbol}`"))
++                            .collect::<Vec<_>>()
++                            .join(", "),
++                    ),
++                    _ => None,
++                })
++                .unwrap_or_default();
++            message.push_str(&format!("\n  {}. {sequence}\n     {rules}", i + 1));
++        }
++        message.push_str("\n\nUse `--json-summary` to see the item sets behind each conflict.");
++        return message;
++    };
++    format!("Unresolved conflict for symbol sequence:\n\n{error}")
++}
++
+ #[derive(Default, Debug, Serialize, Error, Deserialize, PartialEq, Eq)]
+ pub struct ConflictError {
+     pub symbol_sequence: Box<[Box<str>]>,
+@@ -586,6 +636,8 @@ impl<'a> ParseTableBuilder<'a> {
+             parse_state_queue: VecDeque::new(),
+             auxiliary_contexts: AuxiliarySymbolContexts::default(),
+             actual_conflicts: syntax_grammar.expected_conflicts.iter().cloned().collect(),
++            unresolved_conflicts: Vec::new(),
++            unresolved_conflict_keys: FxHashSet::default(),
+             parse_table: ParseTable {
+                 states: Vec::new(),
+                 action_lists: ActionListPool::default(),
+@@ -731,6 +783,10 @@ impl<'a> ParseTableBuilder<'a> {
+             )?;
+         }
+ 
++        if !self.unresolved_conflicts.is_empty() {
++            return Err(ParseTableBuilderError::Conflicts(self.unresolved_conflicts));
++        }
++
+         if !self.actual_conflicts.is_empty() {
+             let mut conflicts = self
+                 .actual_conflicts
+@@ -1504,9 +1560,15 @@ impl<'a> ParseTableBuilder<'a> {
+                     .collect(),
+             });
+ 
+-        self.actual_conflicts.insert(actual_conflict);
++        // Keep both actions, as if the conflict had been declared, and keep building:
++        // the tables are discarded anyway, and carrying on is what finds the conflicts
++        // in the states behind this one. Bison reports conflicts the same way, instead
++        // of stopping at the first one.
++        if self.unresolved_conflict_keys.insert(actual_conflict) {
++            self.unresolved_conflicts.push(conflict_error);
++        }
+ 
+-        Err(conflict_error)?
++        Ok(())
+     }
+ 
+     fn compare_precedence(
+diff --git a/crates/generate/src/generate.rs b/crates/generate/src/generate.rs
+index 52e4754..1dc47f2 100644
+--- a/crates/generate/src/generate.rs
++++ b/crates/generate/src/generate.rs
+@@ -814,4 +814,109 @@ mod tests {
+         )
+         .unwrap();
+     }
++
++    /// Two independent ambiguities, and no `conflicts` entry for either.
++    const AMBIGUOUS_GRAMMAR: &str = r#"{
++        "name": "unresolved_conflicts",
++        "rules": {
++            "source_file": {"type": "CHOICE", "members": [
++                {"type": "SYMBOL", "name": "statement"},
++                {"type": "SYMBOL", "name": "expr"}
++            ]},
++            "statement": {"type": "CHOICE", "members": [
++                {"type": "SEQ", "members": [
++                    {"type": "STRING", "value": "if"},
++                    {"type": "SYMBOL", "name": "expr"},
++                    {"type": "STRING", "value": "then"},
++                    {"type": "SYMBOL", "name": "statement"}
++                ]},
++                {"type": "SEQ", "members": [
++                    {"type": "STRING", "value": "if"},
++                    {"type": "SYMBOL", "name": "expr"},
++                    {"type": "STRING", "value": "then"},
++                    {"type": "SYMBOL", "name": "statement"},
++                    {"type": "STRING", "value": "else"},
++                    {"type": "SYMBOL", "name": "statement"}
++                ]}
++            ]},
++            "expr": {"type": "CHOICE", "members": [
++                {"type": "SYMBOL", "name": "identifier"},
++                {"type": "SEQ", "members": [
++                    {"type": "SYMBOL", "name": "expr"},
++                    {"type": "STRING", "value": "+"},
++                    {"type": "SYMBOL", "name": "expr"}
++                ]}
++            ]},
++            "identifier": {"type": "PATTERN", "value": "[a-z]+"}
++        }
++    }"#;
++
++    fn generate_error_message(grammar_json: &str) -> String {
++        let error = super::generate_parser_for_grammar(
++            grammar_json,
++            None,
++            super::OptLevel::default(),
++            &mut Vec::new(),
++        )
++        .expect_err("grammar should not generate");
++        let mut message = error.to_string();
++        let mut source = std::error::Error::source(&error);
++        while let Some(error) = source {
++            message.push_str("\n");
++            message.push_str(&error.to_string());
++            source = error.source();
++        }
++        message
++    }
++
++    #[test]
++    fn test_every_unresolved_conflict_is_reported_in_one_run() {
++        // Reporting only the first conflict makes a ported grammar take one `generate`
++        // run per conflict pair; bison reports them all at once.
++        let message = generate_error_message(AMBIGUOUS_GRAMMAR);
++        assert!(
++            message.contains("Unresolved conflicts for 2 symbol sequences"),
++            "expected both conflicts in one message, got: {message}"
++        );
++        assert!(message.contains("expr '+' expr"), "{message}");
++        assert!(message.contains("statement •  'else'"), "{message}");
++    }
++
++    #[test]
++    fn test_a_declared_conflict_is_not_reported() {
++        let grammar_json = AMBIGUOUS_GRAMMAR.replace(
++            r#""name": "unresolved_conflicts","#,
++            r#""name": "unresolved_conflicts", "conflicts": [["statement"], ["expr"]],"#,
++        );
++        assert_ne!(grammar_json, AMBIGUOUS_GRAMMAR);
++        super::generate_parser_for_grammar(
++            &grammar_json,
++            None,
++            super::OptLevel::default(),
++            &mut Vec::new(),
++        )
++        .unwrap();
++    }
++
++    #[test]
++    fn test_a_single_unresolved_conflict_keeps_the_detailed_report() {
++        // With one conflict there is room for the item sets and the precedence that
++        // would resolve it, so keep that report instead of the summary.
++        let grammar_json = AMBIGUOUS_GRAMMAR.replace(
++            r#",
++                {"type": "SEQ", "members": [
++                    {"type": "SYMBOL", "name": "expr"},
++                    {"type": "STRING", "value": "+"},
++                    {"type": "SYMBOL", "name": "expr"}
++                ]}"#,
++            "",
++        );
++        assert_ne!(grammar_json, AMBIGUOUS_GRAMMAR);
++        let message = generate_error_message(&grammar_json);
++        assert!(
++            message.contains("Unresolved conflict for symbol sequence"),
++            "{message}"
++        );
++        assert!(message.contains("Possible interpretations"), "{message}");
++    }
+ }
+diff --git a/docs/src/cli/generate.md b/docs/src/cli/generate.md
+index f80aae1..53be78a 100644
+--- a/docs/src/cli/generate.md
++++ b/docs/src/cli/generate.md
+@@ -17,6 +17,10 @@ it will exit with a `Unresolved conflict` error message. To learn more about con
+ the section on [`Structuring Rules Well`](../creating-parsers/3-writing-the-grammar.md#structuring-rules-well)
+ in the user guide.
+ 
++A grammar that is ported from another parser generator usually has several independent conflicts. Rather than stopping
++at the first one, `generate` reports all of them in a single run, with the `conflicts` entry that each one needs. Pass
++[`--json-summary`](#--json-summary) to get the item sets behind each conflict.
++
+ ## Generated files
+ 
+ - `src/parser.c` implements the parser logic specified in the grammar.
+-- 
+2.55.0
+

@@ -1,0 +1,44 @@
+// Every expression shape: alternation, juxtaposition, grouping, the multipliers,
+// and all five `@` annotations. The precedence levels live in `directives.tsg`;
+// here the goal is the shape of a rule body.
+
+%name expressions;
+%extras none;
+%precedence right "pow" = '^';
+%precedence left "add" = '+' '-';
+%precedence "call";
+%precedence "unary";
+
+// Retrieval is processed before assignment, and the groups are only there to
+// make `?`/`*`/`+` bind to the group rather than to the last operand.
+start: alternation? juxtaposition grouped | ();
+
+alternation: 'a' | 'b' 'c';
+
+juxtaposition: 'd' 'e' 'f';
+
+grouped:
+    ('g' 'h')? 'i'
+  | ('j' 'k')* 'l'
+  | ('m' 'n')+ 'o'
+  | $field
+  | call_ish;
+
+// `@` applies to the whole alternative, which is the point of the spelling:
+// yacc's `expr: expr '+' expr [prec]` marks the production, not the operand.
+call_ish:
+    _value '^' _value
+  | _value '+' _value @left(1)
+  | _value '-' _value @unary
+  | _value @0
+  | _value _value @right(call)
+  | _value @dynamic(2);
+
+_value: 'p' | 'q';
+
+field: 'r';
+
+// `name= element` is a field label on one element — the call `field('name', x)`
+// with the argument first, so the sentence reads left to right. `tail= ('t')?`
+// puts the `?` on the element, so the label is on whatever the group yields.
+labelled: subject= 's' value= /v/ tail= ('t')?;

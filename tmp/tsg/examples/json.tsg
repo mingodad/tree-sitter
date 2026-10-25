@@ -1,0 +1,22 @@
+// A conventional JSON grammar, written in .tsg.
+//
+//     tsg examples/json.tsg -o src/grammar.json
+//     tree-sitter generate src/grammar.json
+//
+%name json;
+%extra /\s/;
+
+document: _value;
+
+_value: object | array | number | string | true | false | null;
+
+object: '{' optional(seq(_pair, repeat(seq(',', _pair)))) '}';
+_pair: field(key, string) ':' field(value, _value);
+array: '[' optional(seq(_value, repeat(seq(',', _value)))) ']';
+
+number: token(/-?(0|[1-9]\d*)(\.\d+)?([eE][+-]?\d+)?/);
+string: token(seq('"', repeat(choice(/[^"\\]+/, /\\./)), '"'));
+
+true: 'true';
+false: 'false';
+null: 'null';

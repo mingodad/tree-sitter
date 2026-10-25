@@ -1,0 +1,4 @@
+.check/
+lib/
+__pycache__/
+*.log

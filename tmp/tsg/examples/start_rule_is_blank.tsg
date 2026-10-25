@@ -1,0 +1,4 @@
+// test/fixtures/test_grammars/start_rule_is_blank/grammar.js
+%name start_rule_is_blank;
+
+first_rule: blank();

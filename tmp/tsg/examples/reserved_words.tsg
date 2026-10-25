@@ -1,0 +1,24 @@
+// test/fixtures/test_grammars/reserved_words/grammar.js
+%name reserved_words;
+%word identifier;
+%reserved global = 'if', 'while', 'var';
+%reserved property = 'var';
+
+program: repeat(_statement);
+block: '{' repeat(_statement) '}';
+_statement: var_declaration | if_statement | while_statement | expression_statement;
+var_declaration: 'var' identifier '=' _expression ';';
+if_statement: 'if' parenthesized_expression block;
+while_statement: 'while' parenthesized_expression block;
+expression_statement: _expression ';';
+_expression: identifier | parenthesized_expression | call_expression
+    | member_expression | object | regex;
+parenthesized_expression: '(' _expression ')';
+member_expression: _expression '.' identifier;
+call_expression: _expression '(' repeat(seq(_expression, ',')) ')';
+object: '{' repeat(seq(choice(pair, getter), ',')) '}';
+regex: '/' regex_pattern '/';
+regex_pattern: token(prec(-1, /[^/\n]+/));
+pair: reserved(property, identifier) ':' _expression;
+getter: 'get' reserved(property, identifier) '(' ')' block;
+identifier: /[a-z_]\w*/;

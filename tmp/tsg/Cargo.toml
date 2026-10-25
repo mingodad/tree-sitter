@@ -1,0 +1,20 @@
+[package]
+name = "tsg"
+version = "0.1.0"
+edition = "2021"
+description = "Compile the declarative .tsg grammar syntax to tree-sitter's grammar.json"
+license = "MIT"
+
+# Standalone workspace root, so this crate is not pulled into the
+# enclosing tree-sitter cargo workspace.
+[workspace]
+
+[lib]
+name = "tsg"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tsg"
+path = "src/main.rs"
+
+[dependencies]

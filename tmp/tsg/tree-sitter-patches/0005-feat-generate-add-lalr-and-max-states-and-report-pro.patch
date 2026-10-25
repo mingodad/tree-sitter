@@ -1,0 +1,576 @@
+From b363428cfc7c4670b9da52ad79dce8d5390083f7 Mon Sep 17 00:00:00 2001
+From: Domingo Alvarez Duarte <mingo@Domingos-MacBook-Air.local>
+Date: Sun, 25 Oct 2026 13:21:50 +0100
+Subject: [PATCH 5/8] feat(generate): add `--lalr` and `--max-states`, and
+ report progress
+
+Canonical LR(1) states are what make `generate` infeasible for grammars
+that are written for yacc/bison: their state count grows with the number of
+distinct lookahead sets per kernel item, and for a grammar of a real
+language it explodes (the PostgreSQL 16 grammar needs 354k states, and
+`generate` never finishes). Bison users have always been fine with LALR(1),
+which merges states that have the same kernel items and unions their
+lookaheads.
+
+Add `OptLevel::Lalr` and the `--lalr` flag: when a new state has the same
+kernel core (`ParseItemSetCore`) as an existing state, merge the lookahead
+sets into the existing state and re-run it, resetting the actions that its
+lookaheads produced. Lookahead sets only grow, so this reaches a fixpoint.
+`ParseStateInfo::item_sets_by_ids` becomes a plain `Vec` indexed by state
+id, since LALR lookup is by id rather than by full item set.
+
+Keep it opt-in: it can report conflicts that canonical LR(1) resolves away,
+so it should not silently change what existing grammars accept.
+
+Also add `--max-states N` to turn a state explosion into an error instead
+of a process to kill, and a stage-timing line every 2s under
+`TS_DEBUG_TIMING` so a slow stage is visible while it runs.
+
+PostgreSQL 16 (1195 rules): >90s/killed, 942MB -> 4.1s, 87MB.
+---
+ crates/cli/src/main.rs                        |  13 +
+ crates/generate/src/build_tables.rs           |  28 +++
+ .../src/build_tables/build_parse_table.rs     | 234 ++++++++++++++----
+ crates/generate/src/generate.rs               |  11 +
+ docs/src/cli/generate.md                      |  19 ++
+ 5 files changed, 253 insertions(+), 52 deletions(-)
+
+diff --git a/crates/cli/src/main.rs b/crates/cli/src/main.rs
+index da901fa..b086853 100644
+--- a/crates/cli/src/main.rs
++++ b/crates/cli/src/main.rs
+@@ -168,6 +168,16 @@ struct Generate {
+     /// the merging of compatible parse states.
+     #[arg(long)]
+     pub disable_optimizations: bool,
++    /// Build LALR(1) parse states instead of canonical LR(1) states.
++    ///
++    /// States that differ only in their lookahead sets are merged, the way yacc and
++    /// bison do it. This is much smaller and faster for large grammars, but it can
++    /// report conflicts that canonical LR(1) resolves away.
++    #[arg(long)]
++    pub lalr: bool,
++    /// Abort if the parser needs more than this many parse states.
++    #[arg(long, value_name = "N")]
++    pub max_states: Option<usize>,
+ }
+ 
+ #[derive(Args)]
+@@ -969,9 +979,12 @@ impl Generate {
+             !self.no_parser,
+             if self.disable_optimizations {
+                 OptLevel::empty()
++            } else if self.lalr {
++                OptLevel::default() | OptLevel::Lalr
+             } else {
+                 OptLevel::default()
+             },
++            self.max_states,
+             &mut diagnostics,
+         );
+         if json_summary {
+diff --git a/crates/generate/src/build_tables.rs b/crates/generate/src/build_tables.rs
+index 6720050..9218f70 100644
+--- a/crates/generate/src/build_tables.rs
++++ b/crates/generate/src/build_tables.rs
+@@ -119,23 +119,46 @@ pub fn build_tables(
+     str_pool: &StrPool,
+     report_symbol_name: Option<&str>,
+     optimizations: OptLevel,
++    max_states: Option<usize>,
+     diagnostics: &mut Vec<Diagnostic>,
+ ) -> BuildTableResult<Tables> {
++    let timing = std::env::var_os("TS_DEBUG_TIMING").is_some();
++    let mut stage_time = std::time::Instant::now();
++    macro_rules! stage {
++        ($name:expr) => {
++            if timing {
++                let now = std::time::Instant::now();
++                eprintln!(
++                    "  stage {:24} {:>8.2}s",
++                    $name,
++                    now.duration_since(stage_time).as_secs_f64()
++                );
++                let _ = std::mem::replace(&mut stage_time, now);
++            }
++        };
++    }
++
+     let item_key_map = ItemKeyMap::new(syntax_grammar, str_pool);
+     let item_set_builder =
+         ParseItemSetBuilder::new(syntax_grammar, lexical_grammar, inlines, &item_key_map);
+     let following_tokens = get_following_tokens(syntax_grammar, lexical_grammar, &item_set_builder);
++    stage!("following_tokens");
+     let (mut parse_table, parse_state_info) = build_parse_table(
+         syntax_grammar,
+         lexical_grammar,
+         item_set_builder,
+         variable_info,
+         str_pool,
++        optimizations.contains(OptLevel::Lalr),
++        max_states,
+         diagnostics,
+     )?;
++    stage!("parse_table");
+     let token_conflict_map = TokenConflictMap::new(lexical_grammar, following_tokens);
++    stage!("token_conflicts");
+     let coincident_token_index =
+         CoincidentTokenIndex::new(&parse_table, lexical_grammar, syntax_grammar.word_token);
++    stage!("coincident_tokens");
+     let keywords = identify_keywords(
+         lexical_grammar,
+         syntax_grammar.word_token,
+@@ -143,6 +166,7 @@ pub fn build_tables(
+         &coincident_token_index,
+         str_pool,
+     );
++    stage!("identify_keywords");
+     populate_error_state(
+         &mut parse_table,
+         syntax_grammar,
+@@ -152,6 +176,7 @@ pub fn build_tables(
+         &keywords,
+         str_pool,
+     );
++    stage!("error_state");
+     populate_used_symbols(&mut parse_table, syntax_grammar, lexical_grammar);
+     minimize_parse_table(
+         &mut parse_table,
+@@ -163,6 +188,7 @@ pub fn build_tables(
+         str_pool,
+         optimizations,
+     );
++    stage!("minimize_parse_table");
+     let lex_tables = build_lex_table(
+         &mut parse_table,
+         syntax_grammar,
+@@ -172,8 +198,10 @@ pub fn build_tables(
+         &token_conflict_map,
+         str_pool,
+     );
++    stage!("build_lex_table");
+     populate_external_lex_states(&mut parse_table, syntax_grammar);
+     mark_fragile_tokens(&mut parse_table, &token_conflict_map);
++    stage!("fragile_tokens");
+     parse_table
+         .action_lists
+         .canonicalize(&mut parse_table.states);
+diff --git a/crates/generate/src/build_tables/build_parse_table.rs b/crates/generate/src/build_tables/build_parse_table.rs
+index 690e739..57786c1 100644
+--- a/crates/generate/src/build_tables/build_parse_table.rs
++++ b/crates/generate/src/build_tables/build_parse_table.rs
+@@ -3,13 +3,11 @@ use std::{
+     collections::{BTreeMap, BTreeSet, VecDeque},
+     hash::{BuildHasher as _, BuildHasherDefault},
+     num::NonZeroU32,
++    time::{Duration, Instant},
+ };
+ 
+ use hashbrown::{HashTable, hash_table};
+-use indexmap::{
+-    IndexMap,
+-    map::{Entry, RawEntryApiV1, raw_entry_v1::RawEntryMut},
+-};
++use indexmap::{IndexMap, map::Entry};
+ use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet, FxHasher};
+ use serde::{Deserialize, Serialize};
+ use thiserror::Error;
+@@ -199,14 +197,15 @@ impl AuxiliarySymbolContexts {
+ 
+ pub struct ParseStateInfo<'a> {
+     pub preceding_symbols_by_id: Vec<SymbolSequence>,
+-    item_sets_by_ids: IndexMap<ParseItemSet<'a>, ParseStateId, BuildHasherDefault<FxHasher>>,
++    /// Each state's kernel, indexed by state id.
++    item_sets_by_ids: Vec<ParseItemSet<'a>>,
+     pub lookaheads: LookaheadSetPool,
+ }
+ 
+ impl<'a> ParseStateInfo<'a> {
+     #[must_use]
+     pub fn item_set(&self, id: ParseStateId) -> &ParseItemSet<'a> {
+-        self.item_sets_by_ids.get_index(id as usize).unwrap().0
++        &self.item_sets_by_ids[id as usize]
+     }
+ }
+ 
+@@ -328,7 +327,22 @@ struct ParseTableBuilder<'a> {
+     lexical_grammar: &'a LexicalGrammar,
+     variable_info: &'a [VariableInfo],
+     core_ids_by_core: FxHashMap<ParseItemSetCore<'a>, u32>,
++    /// Canonical LR(1) mode: dedup of states by their full kernel (items and lookaheads).
+     state_ids_by_item_set: IndexMap<ParseItemSet<'a>, ParseStateId, BuildHasherDefault<FxHasher>>,
++    /// LALR mode: one state per kernel core (items only, no lookaheads).
++    state_ids_by_core: FxHashMap<ParseItemSetCore<'a>, ParseStateId>,
++    /// LALR mode: states whose lookaheads grew after they were built, so their
++    /// actions must be rebuilt. Lookahead sets only grow, so this reaches a
++    /// fixpoint.
++    dirty_states: FxHashSet<ParseStateId>,
++    /// Each state's kernel, indexed by state id.
++    kernels: Vec<ParseItemSet<'a>>,
++    /// Each state's auxiliary context, so a rebuilt state can reproduce it.
++    auxiliary_context_by_id: Vec<Option<AuxiliaryContextId>>,
++    /// Whether to build LALR(1) states instead of canonical LR(1) states.
++    lalr: bool,
++    /// Abort once this many parse states exist.
++    max_states: Option<usize>,
+     preceding_symbols_by_id: Vec<SymbolSequence>,
+     production_info_ids_by_prod_id: Vec<Option<ProductionInfoId>>,
+     parse_state_queue: VecDeque<ParseStateQueueEntry>,
+@@ -363,6 +377,13 @@ pub enum ParseTableBuilderError {
+     ImproperNonTerminalExtra(Box<str>),
+     #[error("State count `{0}` exceeds the max value {max}.", max=u16::MAX)]
+     StateCount(usize),
++    #[error(
++        "Grammar needs more than {max} parse states. Canonical LR(1) state counts can explode \
++         on large grammars; the number of states depends on lookahead sets, not just on the \
++         grammar's size. Try `--lalr`, which merges states that differ only in lookaheads (the \
++         way yacc and bison do), or raise `--max-states`."
++    )]
++    TooManyStates { max: usize },
+ }
+ 
+ impl From<ConflictError> for ParseTableBuilderError {
+@@ -541,6 +562,8 @@ impl<'a> ParseTableBuilder<'a> {
+         item_set_builder: ParseItemSetBuilder<'a>,
+         variable_info: &'a [VariableInfo],
+         str_pool: &'a StrPool,
++        lalr: bool,
++        max_states: Option<usize>,
+     ) -> Self {
+         let symbol_indexer = SymbolIndexer::new(syntax_grammar, lexical_grammar);
+         Self {
+@@ -550,6 +573,12 @@ impl<'a> ParseTableBuilder<'a> {
+             variable_info,
+             non_terminal_extra_states: Vec::new(),
+             state_ids_by_item_set: IndexMap::default(),
++            state_ids_by_core: FxHashMap::default(),
++            dirty_states: FxHashSet::default(),
++            kernels: Vec::new(),
++            auxiliary_context_by_id: Vec::new(),
++            lalr,
++            max_states,
+             core_ids_by_core: FxHashMap::default(),
+             preceding_symbols_by_id: Vec::new(),
+             production_info_ids_by_prod_id: vec![None; syntax_grammar.productions.len()],
+@@ -651,16 +680,45 @@ impl<'a> ParseTableBuilder<'a> {
+             self.non_terminal_extra_states.push((terminal, state_id));
+         }
+ 
++        let started = Instant::now();
++        let mut last_progress = started;
+         while let Some(entry) = self.parse_state_queue.pop_front() {
+-            // The dedup-map key is each state's kernel (the GOTO result, pre closure).
+-            // Two states are identical iff their kernels match.
+-            let kernel = self
+-                .state_ids_by_item_set
+-                .get_index(entry.state_id as usize)
+-                // Invariant: `state_id` is the map's insertion index
+-                .unwrap()
+-                .0;
+-            let item_set = self.item_set_builder.transitive_closure(kernel);
++            if let Some(max) = self.max_states
++                && self.parse_table.states.len() > max
++            {
++                return Err(ParseTableBuilderError::TooManyStates { max });
++            }
++
++            // Slow grammars used to fail with no output at all. One line every
++            // couple of seconds is enough to tell "working" from "stuck", and
++            // costs nothing for grammars that finish quickly.
++            if last_progress.elapsed() >= Duration::from_secs(2) {
++                eprintln!(
++                    "  {} parse states, {} queued, {:.1}s ({})",
++                    self.parse_table.states.len(),
++                    self.parse_state_queue.len(),
++                    started.elapsed().as_secs_f64(),
++                    if self.lalr { "lalr" } else { "lr(1)" },
++                );
++                last_progress = Instant::now();
++            }
++
++            // In LALR mode a state can be revisited after more lookaheads reached
++            // it. Its actions are recomputed from scratch; action lists are
++            // interned, so rebuilding does not leak table entries.
++            if self.lalr && self.dirty_states.remove(&entry.state_id) {
++                let state = &mut self.parse_table.states[entry.state_id as usize];
++                state.terminal_entries = TerminalEntries::default();
++                state.nonterminal_entries = NonterminalEntries::default();
++                state.reserved_words = TokenSet::default();
++                state.has_eof_gated_reduce = false;
++            }
++
++            // The state's kernel is the GOTO result, before closure: two states
++            // are identical iff their kernels match.
++            let item_set = self
++                .item_set_builder
++                .transitive_closure(&self.kernels[entry.state_id as usize]);
+ 
+             self.add_actions(
+                 self.preceding_symbols_by_id[entry.state_id as usize].clone(),
+@@ -684,7 +742,7 @@ impl<'a> ParseTableBuilder<'a> {
+             self.parse_table,
+             ParseStateInfo {
+                 preceding_symbols_by_id: self.preceding_symbols_by_id,
+-                item_sets_by_ids: self.state_ids_by_item_set,
++                item_sets_by_ids: self.kernels,
+                 lookaheads: self.item_set_builder.lookaheads,
+             },
+         ))
+@@ -696,45 +754,113 @@ impl<'a> ParseTableBuilder<'a> {
+         preceding_auxiliary_context: Option<AuxiliaryContextId>,
+         item_set: &ParseItemSet<'a>,
+     ) -> ParseStateId {
+-        // Hash the item set once, for both the lookup and a possible insert.
+-        let hash = self.state_ids_by_item_set.hasher().hash_one(item_set);
+-        match self
+-            .state_ids_by_item_set
+-            .raw_entry_mut_v1()
+-            .from_key_hashed_nocheck(hash, item_set)
++        if self.lalr {
++            return self.merge_parse_state(
++                preceding_symbols,
++                preceding_auxiliary_context,
++                item_set,
++            );
++        }
++
++        // If an equivalent item set has already been processed, then return the
++        // existing parse state index.
++        if let Some(&state_id) = self.state_ids_by_item_set.get(item_set) {
++            return state_id;
++        }
++
++        // Otherwise, insert a new parse state and add it to the queue of parse
++        // states to populate.
++        let state_id = self.push_state(preceding_symbols, preceding_auxiliary_context, item_set);
++        self.state_ids_by_item_set
++            .insert(item_set.clone(), state_id);
++        state_id
++    }
++
++    /// LALR(1) state construction: states are identified by their kernel core,
++    /// not by their lookahead sets. When a new kernel has the same core as an
++    /// existing state, its lookaheads are merged into that state instead of
++    /// creating a new one, and the state is scheduled for a rebuild if its
++    /// lookaheads grew. This is how yacc and bison build their tables, and it is
++    /// what keeps a grammar with many lookahead contexts from multiplying states.
++    fn merge_parse_state(
++        &mut self,
++        preceding_symbols: &SymbolSequence,
++        preceding_auxiliary_context: Option<AuxiliaryContextId>,
++        item_set: &ParseItemSet<'a>,
++    ) -> ParseStateId {
++        let core = item_set.core();
++        let Some(&state_id) = self.state_ids_by_core.get(&core) else {
++            let state_id =
++                self.push_state(preceding_symbols, preceding_auxiliary_context, item_set);
++            self.state_ids_by_core.insert(core, state_id);
++            return state_id;
++        };
++
++        let mut grew = false;
+         {
+-            // If an equivalent item set has already been processed, then return
+-            // the existing parse state index.
+-            RawEntryMut::Occupied(o) => *o.get(),
+-
+-            // Otherwise, insert a new parse state and add it to the queue of
+-            // parse states to populate.
+-            RawEntryMut::Vacant(v) => {
+-                let core = item_set.core();
+-                let core_count = self.core_ids_by_core.len() as u32;
+-                let core_id = *self.core_ids_by_core.entry(core).or_insert(core_count);
+-
+-                let state_id = self.parse_table.states.len() as u32;
+-                self.preceding_symbols_by_id.push(preceding_symbols.clone());
+-
+-                self.parse_table.states.push(ParseState {
+-                    id: state_id,
+-                    lex_state_id: 0,
+-                    external_lex_state_id: 0,
+-                    terminal_entries: TerminalEntries::default(),
+-                    nonterminal_entries: NonterminalEntries::default(),
+-                    reserved_words: TokenSet::default(),
+-                    core_id,
+-                    has_eof_gated_reduce: false,
+-                });
+-                self.parse_state_queue.push_back(ParseStateQueueEntry {
+-                    state_id,
+-                    preceding_auxiliary_context,
+-                });
+-                v.insert_hashed_nocheck(hash, item_set.clone(), state_id);
+-                state_id
++            let stored = &mut self.kernels[state_id as usize];
++            debug_assert_eq!(stored.entries.len(), item_set.entries.len());
++            for (dst, src) in stored.entries.iter_mut().zip(&item_set.entries) {
++                debug_assert!(dst.item == src.item);
++                let merged = self
++                    .item_set_builder
++                    .lookaheads
++                    .union(dst.lookaheads, src.lookaheads);
++                if merged != dst.lookaheads {
++                    dst.lookaheads = merged;
++                    grew = true;
++                }
++                let reserved = dst
++                    .following_reserved_word_set
++                    .max(src.following_reserved_word_set);
++                if reserved != dst.following_reserved_word_set {
++                    dst.following_reserved_word_set = reserved;
++                    grew = true;
++                }
+             }
+         }
++
++        if grew && self.dirty_states.insert(state_id) {
++            self.parse_state_queue.push_back(ParseStateQueueEntry {
++                state_id,
++                preceding_auxiliary_context: self.auxiliary_context_by_id[state_id as usize],
++            });
++        }
++        state_id
++    }
++
++    /// Adds a brand new parse state for `item_set` and queues it for population.
++    fn push_state(
++        &mut self,
++        preceding_symbols: &SymbolSequence,
++        preceding_auxiliary_context: Option<AuxiliaryContextId>,
++        item_set: &ParseItemSet<'a>,
++    ) -> ParseStateId {
++        let core = item_set.core();
++        let core_count = self.core_ids_by_core.len() as u32;
++        let core_id = *self.core_ids_by_core.entry(core).or_insert(core_count);
++
++        let state_id = self.parse_table.states.len() as u32;
++        self.preceding_symbols_by_id.push(preceding_symbols.clone());
++        self.auxiliary_context_by_id
++            .push(preceding_auxiliary_context);
++        self.kernels.push(item_set.clone());
++
++        self.parse_table.states.push(ParseState {
++            id: state_id,
++            lex_state_id: 0,
++            external_lex_state_id: 0,
++            terminal_entries: TerminalEntries::default(),
++            nonterminal_entries: NonterminalEntries::default(),
++            reserved_words: TokenSet::default(),
++            core_id,
++            has_eof_gated_reduce: false,
++        });
++        self.parse_state_queue.push_back(ParseStateQueueEntry {
++            state_id,
++            preceding_auxiliary_context,
++        });
++        state_id
+     }
+ 
+     fn add_actions(
+@@ -1554,6 +1680,8 @@ pub fn build_parse_table<'a>(
+     item_set_builder: ParseItemSetBuilder<'a>,
+     variable_info: &'a [VariableInfo],
+     str_pool: &'a StrPool,
++    lalr: bool,
++    max_states: Option<usize>,
+     diagnostics: &mut Vec<Diagnostic>,
+ ) -> BuildTableResult<(ParseTable, ParseStateInfo<'a>)> {
+     ParseTableBuilder::new(
+@@ -1562,6 +1690,8 @@ pub fn build_parse_table<'a>(
+         item_set_builder,
+         variable_info,
+         str_pool,
++        lalr,
++        max_states,
+     )
+     .build(diagnostics)
+ }
+diff --git a/crates/generate/src/generate.rs b/crates/generate/src/generate.rs
+index ad778ea..52e4754 100644
+--- a/crates/generate/src/generate.rs
++++ b/crates/generate/src/generate.rs
+@@ -262,6 +262,12 @@ bitflags! {
+     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+     pub struct OptLevel: u32 {
+         const MergeStates = 1 << 0;
++        /// Build LALR(1) states instead of canonical LR(1) states: when a new
++        /// state has the same kernel core as an existing one, merge their
++        /// lookahead sets and rebuild the state. This is what yacc/bison do,
++        /// and it keeps large grammars from exploding in state count, at the
++        /// cost of reporting conflicts that canonical LR(1) would not have.
++        const Lalr = 1 << 1;
+     }
+ }
+ 
+@@ -340,6 +346,7 @@ pub fn generate_parser_in_directory<T, U, V>(
+     js_runtime: Option<&str>,
+     generate_parser: bool,
+     optimizations: OptLevel,
++    max_states: Option<usize>,
+     diagnostics: &mut Vec<Diagnostic>,
+ ) -> GenerateResult<()>
+ where
+@@ -421,6 +428,7 @@ where
+         semantic_version.map(|v| (v.major as u8, v.minor as u8, v.patch as u8)),
+         report_symbol_name,
+         optimizations,
++        max_states,
+         diagnostics,
+     )?;
+ 
+@@ -449,6 +457,7 @@ pub fn generate_parser_for_grammar(
+         semantic_version,
+         None,
+         optimizations,
++        None,
+         diagnostics,
+     )?;
+     Ok((name, parser.c_code))
+@@ -500,6 +509,7 @@ fn generate_parser_for_grammar_with_opts(
+     semantic_version: Option<(u8, u8, u8)>,
+     report_symbol_name: Option<&str>,
+     optimizations: OptLevel,
++    max_states: Option<usize>,
+     diagnostics: &mut Vec<Diagnostic>,
+ ) -> GenerateResult<GeneratedParser> {
+     let grammar_name = input_grammar.name;
+@@ -529,6 +539,7 @@ fn generate_parser_for_grammar_with_opts(
+         &str_pool,
+         report_symbol_name,
+         optimizations,
++        max_states,
+         diagnostics,
+     )?;
+     let c_code = render_c_code(
+diff --git a/docs/src/cli/generate.md b/docs/src/cli/generate.md
+index df9111f..f80aae1 100644
+--- a/docs/src/cli/generate.md
++++ b/docs/src/cli/generate.md
+@@ -66,6 +66,25 @@ This avoids the dependency on a JavaScript runtime entirely. The native QuickJS
+ with ESM as well as with CommonJS in strict mode. If your grammar depends on `npm` to install dependencies such as base
+ grammars, the native runtime can be used *after* running `npm install`.
+ 
++### `--lalr`
++
++Build LALR(1) parse states instead of canonical LR(1) states. States whose kernel items are identical, but whose
++lookahead sets differ, are merged and rebuilt, the way yacc and bison do it. For large grammars this can reduce the
++number of parse states (and the size of the generated table) by orders of magnitude, at the cost of reporting
++conflicts that canonical LR(1) states would have resolved away.
++
++This is mainly useful when porting a grammar that already works in yacc or bison. Bison builds LALR(1) tables, so a
++grammar that is conflict-free there normally generates with `--lalr` as well; if canonical LR(1) state generation is
++infeasible for it (generation takes minutes, or `--max-states` aborts), `--lalr` is what makes it generate at all. Any
++conflict that `--lalr` reports but bison does not is ambiguity the port introduced, so resolve it rather than adding a
++`conflicts` entry. This is not a general speed knob: it changes which states are built, and therefore the generated
++parser, so keep the default for grammars that were written for Tree-sitter.
++
++### `--max-states <N>`
++
++Abort parser generation with an error if the parser needs more than `N` parse states. This bounds the time and memory
++that `generate` can spend on a grammar whose state count is exploding, instead of leaving you to kill the process.
++
+ ### `--disable-optimization`
+ 
+ Disable optimizations when generating the parser. Currently, this only affects the merging of compatible parse states.
+-- 
+2.55.0
+

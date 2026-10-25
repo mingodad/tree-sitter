@@ -1,0 +1,6 @@
+%extras none;
+
+file: expr;
+expr: prec("unary", seq("-", expr))
+    | number;
+number: /[0-9]+/;

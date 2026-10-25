@@ -1,0 +1,2 @@
+file: expr;
+expr: choice(seq("x"));

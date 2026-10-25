@@ -1,0 +1,233 @@
+From d29e0d213200664326d8e67f7bfa873a35f6978e Mon Sep 17 00:00:00 2001
+From: Mingo <mingo@example.com>
+Date: Sun, 25 Oct 2026 16:21:36 +0100
+Subject: [PATCH] feat(generate): reject unknown grammar keys, warn when an
+ extra is shadowed
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Two ways a grammar author was left to guess.
+
+`grammar.json` was deserialized without `deny_unknown_fields`, so a misspelled
+key was dropped on the floor: `"extra"` for `"extras"`, `"precedences"`,
+`"inline"` vs `"inlined"`, an unknown key inside a rule node — all generated a
+parser from the *remaining* fields and exited 0. A misspelled *field* was caught
+only by accident, because the field was then missing. Both the top-level grammar
+and the tagged rule enum now deny unknown fields, so the error names the key and
+lists the ones that exist.
+
+The lexer report of the previous commit explains why `1 /* c */` lexes `/` as
+division, but a report has to be asked for, and an author who does not already
+suspect the cause will not ask. A token that completes on the first character of
+an extra now warns at generate time, deduplicated per (token, characters, extra)
+and capped at ten rows:
+
+  warning: a token that completes at the start of an extra hides that extra:
+    `/` completes, so the transition on '*' into an extra is never taken
+    at equal length a token beats an extra: no token may be a prefix of an extra
+    that must win, so rename the token or change the extra
+
+Token-vs-token shadows stay report-only: they are usually benign. Only separator
+shadows warn.
+---
+ crates/generate/src/build_tables.rs  | 54 +++++++++++++++++++++++++++-
+ crates/generate/src/generate.rs      | 44 +++++++++++++++++++++++
+ crates/generate/src/parse_grammar.rs | 17 ++++++++-
+ 3 files changed, 113 insertions(+), 2 deletions(-)
+
+diff --git a/crates/generate/src/build_tables.rs b/crates/generate/src/build_tables.rs
+index e6ced50..bb0d3a7 100644
+--- a/crates/generate/src/build_tables.rs
++++ b/crates/generate/src/build_tables.rs
+@@ -27,7 +27,7 @@ use self::{
+     token_conflicts::TokenConflictMap,
+ };
+ use crate::{
+-    Diagnostic, OptLevel,
++    Diagnostic, OptLevel, ShadowedExtra,
+     grammars::{InlinedProductionMap, LexicalGrammar, SyntaxGrammar},
+     nfa::{CharacterSet, NfaCursor},
+     node_types::VariableInfo,
+@@ -216,6 +216,13 @@ pub fn build_tables(
+         str_pool,
+     );
+     stage!("build_lex_table");
++    report_shadowed_extras(
++        syntax_grammar,
++        lexical_grammar,
++        str_pool,
++        &lex_tables.report,
++        diagnostics,
++    );
+     populate_external_lex_states(&mut parse_table, syntax_grammar);
+     mark_fragile_tokens(&mut parse_table, &token_conflict_map);
+     stage!("fragile_tokens");
+@@ -873,6 +880,51 @@ fn plural(count: usize, noun: &str) -> String {
+     }
+ }
+ 
++/// Warn where a token completes on the first character of an extra.
++///
++/// This is nearly always a bug rather than a quirk: the extra can then only be lexed
++/// where no such token is valid, so `1 /* c */` lexes `/` as division whenever `Slash`
++/// is a token of the language. The report shows it (`0009`), but a report has to be
++/// asked for, and an author who does not already suspect the cause will not ask.
++///
++/// Deduplicated per (token, characters, extras), because one shadow occurs in every lex
++/// state whose token set contains the token, and capped, so a grammar with many
++/// prefixes does not drown the other warnings.
++fn report_shadowed_extras(
++    syntax_grammar: &SyntaxGrammar,
++    lexical_grammar: &LexicalGrammar,
++    str_pool: &StrPool,
++    report: &LexReport,
++    diagnostics: &mut Vec<Diagnostic>,
++) {
++    const MAX: usize = 10;
++    let names = LexNames {
++        syntax_grammar,
++        lexical_grammar,
++        str_pool,
++    };
++    let rows = report
++        .states
++        .iter()
++        .flat_map(|state| state.shadows.iter())
++        .filter(|shadow| shadow.pruned_is_separator)
++        .map(|shadow| ShadowedExtra {
++            token: names.name(shadow.completed).into_boxed_str(),
++            characters: describe_characters(&shadow.characters).into_boxed_str(),
++            extras: shadow
++                .pruned_extras
++                .iter()
++                .map(|&symbol| names.name(symbol).into_boxed_str())
++                .collect(),
++        })
++        .collect::<BTreeSet<_>>();
++    if !rows.is_empty() {
++        diagnostics.push(Diagnostic::ShadowedExtras(
++            rows.into_iter().take(MAX).collect(),
++        ));
++    }
++}
++
+ /// The `-` form of the lex report: one line per dropped transition, with how many lex
+ /// states and parse states it affects.
+ fn report_lex_state_summary(report: &LexReport, names: &LexNames) {
+diff --git a/crates/generate/src/generate.rs b/crates/generate/src/generate.rs
+index 7063501..8db6daa 100644
+--- a/crates/generate/src/generate.rs
++++ b/crates/generate/src/generate.rs
+@@ -286,11 +286,55 @@ pub enum Diagnostic {
+     SupertypeInlined { name: Box<str> },
+     UnreachableRule { name: Box<str> },
+     UnproductiveRule { name: Box<str> },
++    ShadowedExtras(Box<[ShadowedExtra]>),
++}
++
++/// A token that completes where an extra begins, so the extra is never lexed there.
++///
++/// Where a token completes, the lexer table cannot keep a separator transition: at
++/// equal matched length a token beats an extra, and that is not configurable. For a
++/// comment extra this shows up as `1 /* c */` lexing the `/` as division.
++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
++pub struct ShadowedExtra {
++    pub token: Box<str>,
++    pub characters: Box<str>,
++    /// The extras the dropped transition belonged to, when they have names.
++    pub extras: Box<[Box<str>]>,
+ }
+ 
+ impl std::fmt::Display for Diagnostic {
+     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+         match self {
++            Self::ShadowedExtras(rows) => {
++                writeln!(
++                    f,
++                    "a token that completes at the start of an extra hides that extra:",
++                )?;
++                for ShadowedExtra {
++                    token,
++                    characters,
++                    extras,
++                } in rows.iter()
++                {
++                    write!(
++                        f,
++                        "  `{token}` completes, so the transition on {characters} into "
++                    )?;
++                    if extras.is_empty() {
++                        writeln!(f, "an extra is never taken")?;
++                    } else {
++                        writeln!(f, "extra `{}` is never taken", extras.join("`, `"))?;
++                    }
++                }
++                if rows.len() >= 10 {
++                    writeln!(f, "  (only the first 10 are shown)")?;
++                }
++                write!(
++                    f,
++                    "  at equal length a token beats an extra: no token may be a prefix of an \
++                     extra that must win, so rename the token or change the extra",
++                )?;
++            }
+             Self::UnnecessaryConflicts(conflicts) => {
+                 writeln!(f, "unnecessary conflicts:")?;
+                 for (i, conflict) in conflicts.iter().enumerate() {
+diff --git a/crates/generate/src/parse_grammar.rs b/crates/generate/src/parse_grammar.rs
+index d7081fc..8d5b75f 100644
+--- a/crates/generate/src/parse_grammar.rs
++++ b/crates/generate/src/parse_grammar.rs
+@@ -1,3 +1,4 @@
++use log::warn;
+ use rustc_hash::{FxHashMap, FxHashSet};
+ use serde::{Deserialize, Serialize};
+ use serde_json::{Map, Value};
+@@ -11,7 +12,7 @@ use crate::{
+ };
+ 
+ #[derive(Deserialize)]
+-#[serde(tag = "type")]
++#[serde(tag = "type", deny_unknown_fields)]
+ #[expect(
+     non_camel_case_types,
+     reason = "variant names match JSON grammar format"
+@@ -90,6 +91,7 @@ enum PrecedenceValueJSON {
+ }
+ 
+ #[derive(Deserialize)]
++#[serde(deny_unknown_fields)]
+ pub struct GrammarJSON {
+     pub name: String,
+     rules: Map<String, Value>,
+@@ -109,6 +111,14 @@ pub struct GrammarJSON {
+     word: Option<String>,
+     #[serde(default)]
+     reserved: Map<String, Value>,
++    /// A JSON schema reference written by tooling. Past it, nothing in the file's
++    /// meaning, but `deny_unknown_fields` would reject every file that carries it.
++    #[serde(rename = "$schema", default)]
++    _schema: Option<Value>,
++    /// The JS DSL merges an inherited grammar before generating; the generator
++    /// itself cannot, so a file that still says it is generating a partial grammar.
++    #[serde(default)]
++    inherits: Option<Value>,
+ }
+ 
+ pub type ParseGrammarResult<T> = Result<T, ParseGrammarError>;
+@@ -227,6 +237,11 @@ pub(crate) fn parse_grammar(
+     diagnostics: &mut Vec<Diagnostic>,
+ ) -> ParseGrammarResult<InputGrammar> {
+     let grammar_json = serde_json::from_str::<GrammarJSON>(input)?;
++    if let Some(inherits) = &grammar_json.inherits {
++        warn!(
++            "this grammar inherits `{inherits}`, which the generator does not merge:              generate it with the JS DSL, or inline the inherited rules into `rules`"
++        );
++    }
+     let mut pool = RulePool::default();
+ 
+     let extra_roots =
+-- 
+2.55.0
+

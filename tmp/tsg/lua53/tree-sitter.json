@@ -1,0 +1,17 @@
+{
+  "grammars": [
+    {
+      "name": "lua53",
+      "camelcase": "Lua53",
+      "scope": "source.lua53",
+      "path": ".",
+      "file-types": ["lua53", "lua"]
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "MIT",
+    "description": "Lua 5.3, translated from lua53.lemonex",
+    "links": { "repository": "https://example.invalid/lua53" }
+  }
+}

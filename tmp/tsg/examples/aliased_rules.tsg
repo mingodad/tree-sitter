@@ -1,0 +1,12 @@
+// test/fixtures/test_grammars/aliased_rules/grammar.js
+%name aliased_rules;
+%extra /\s/;
+%extra star;
+
+statement: _expression ';';
+_expression: call_expression | member_expression | alias(identifier, variable_name);
+call_expression: prec.left(seq(_expression, '(', _expression, ')'));
+member_expression: prec.left(1, seq(_expression, '.', alias(identifier, property_name)));
+identifier: /[a-z]+/;
+star: '*';
+unused: alias(star, star_aliased);

@@ -1,0 +1,16 @@
+{
+  "grammars": [
+    {
+      "name": "bc",
+      "camelcase": "Bc",
+      "scope": "source.bc",
+      "path": ".",
+      "file-types": ["bc"]
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "BSD-3-Clause",
+    "description": "bc calculator"
+  }
+}

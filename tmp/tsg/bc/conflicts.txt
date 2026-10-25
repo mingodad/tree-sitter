@@ -1,0 +1,5 @@
+# Bison resolves the dangling else with `%nonassoc IF_WITHOUT_ELSE` and
+# `%empty %prec IF_WITHOUT_ELSE`. tree-sitter cannot put a precedence on an
+# empty production and prefers the shift, which is the same tree, so the
+# conflict is declared rather than resolved.
+statement

@@ -1,0 +1,15 @@
+[package]
+name = "tsg-elaborate-prototype"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Prototype of the generate.rs elaboration layer for .tsg diagnostics"
+
+# Its own workspace: this directory lives inside the `tsg` package tree.
+[workspace]
+
+[dependencies]
+# No dependencies. `tree-sitter generate --json-summary` supplies the errors as
+# data, and `tsg::json_read` parses them — so this prototype needs neither the
+# generator crate nor a network.
+tsg = { path = ".." }

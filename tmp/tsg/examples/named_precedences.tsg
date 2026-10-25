@@ -1,0 +1,25 @@
+// test/fixtures/test_grammars/named_precedences/grammar.js
+%name named_precedences;
+%conflicts expression type;
+%conflicts expression nested_type;
+%precedence member_expression "and" "or";
+%precedence nested_type "type_intersection" "type_union";
+
+program: repeat(choice(expression_statement, declaration_statement));
+
+expression_statement: expression ';';
+declaration_statement: type expression ';';
+
+expression: member_expression | binary_expression | identifier;
+member_expression: expression '.' identifier;
+binary_expression:
+    prec.left('or', seq(expression, '||', expression))
+  | prec.left('and', seq(expression, '&&', expression));
+
+type: nested_type | binary_type | identifier;
+nested_type: identifier '.' identifier;
+binary_type:
+    prec.left('type_union', seq(type, '||', type))
+  | prec.left('type_intersection', seq(type, '&&', type));
+
+identifier: /[a-z]\w+/;

@@ -1,0 +1,11 @@
+// test/fixtures/test_grammars/dynamic_precedence/grammar.js
+%name dynamic_precedence;
+%extra /\s/;
+%conflicts expression type;
+
+program: declaration | expression;
+expression: prec.left(seq(expression, '*', expression)) | identifier;
+declaration: type declarator;
+declarator: prec.dynamic(1, seq('*', identifier)) | identifier;
+type: identifier;
+identifier: /[a-z-A-Z]+/;

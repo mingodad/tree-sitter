@@ -1,0 +1,4 @@
+// `%extras none;` cannot be combined with `%extra`, so it needs its own file.
+%name no_extras;
+%extras none;
+start: /x/;

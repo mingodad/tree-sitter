@@ -1,0 +1,11 @@
+// test/fixtures/test_grammars/readme_grammar/grammar.js
+%name readme_grammar;
+%extra /\s/;
+%extra comment;
+
+expression: sum | product | number | variable | '(' expression ')';
+sum: prec.left(1, seq(expression, '+', expression));
+product: prec.left(2, seq(expression, '*', expression));
+number: /\d+/;
+comment: /#.*/;
+variable: /(?i:[a-z])\w*/;

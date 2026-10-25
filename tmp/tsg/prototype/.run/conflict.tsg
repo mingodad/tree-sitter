@@ -1,0 +1,7 @@
+%extras none;
+
+file: expr;
+expr: expr "+" expr
+    | expr "*" expr
+    | number;
+number: /[0-9]+/;

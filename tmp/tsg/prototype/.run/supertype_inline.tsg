@@ -1,0 +1,5 @@
+%supertypes _expr;
+%inline _expr;
+
+file: _expr;
+_expr: "x";

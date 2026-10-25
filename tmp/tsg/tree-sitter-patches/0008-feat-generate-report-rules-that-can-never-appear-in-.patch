@@ -1,0 +1,296 @@
+From 49aa685fabfce62cce8e1b06d40eda766fbe9b28 Mon Sep 17 00:00:00 2001
+From: Domingo Alvarez Duarte <mingo@Domingos-MacBook-Air.local>
+Date: Sun, 25 Oct 2026 14:30:34 +0100
+Subject: [PATCH 8/8] feat(generate): report rules that can never appear in a
+ tree
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Two silent failure modes, both of which produce a parser that accepts less than
+the grammar says and says nothing about it:
+
+- A rule that nothing reaches from the start rule was dropped by
+  `InputGrammar::normalize` without a word. Dropping it is right (it is how a
+  grammar with leftover rules still generates), but the author is the one
+  person who needs to know.
+
+- A rule whose every production needs a rule that can never match derives no
+  sentence, so no state can ever reduce to it: the classic missing base case
+  (`a: a b;` with no `a: b;`) or a rule that needs a token nothing lexes. This
+  one generates a parser happily, and the rule simply never appears in a tree.
+  Bison calls the same input "nonterminal useless in grammar".
+
+The first is reported where the drop happens. The second is a worklist over the
+flattened productions, linear in the number of steps: a rule becomes productive
+when one of its productions has no unproductive steps left, where a token or an
+external token always counts as productive. Both are `Diagnostic`s, so they
+print as warnings, reach `--json-summary`, and cost nothing when the grammar is
+healthy (postgres16: 4.01 s / 80 MB, unchanged).
+
+Measured on the 92-grammar corpus already used for the other commits: 10
+grammars gain one or more `not reachable` warnings, and every one of them is a
+dead rule (bash's `string_expansion`, cpp's `_old_style_function_definition`,
+the whole JSX subtree of the TypeScript grammar, …). `cannot match anything` is
+rarer: the only corpus grammar it fires on is `conflicting_precedence`, which
+genuinely has no base case, plus the two shapes added below as tests. It does
+not fire on any of the 358 bison/flex grammars translated by `g2tsg`, nor on
+postgres16.
+---
+ crates/generate/src/generate.rs        | 95 ++++++++++++++++++++++++++
+ crates/generate/src/parse_grammar.rs   | 13 +++-
+ crates/generate/src/prepare_grammar.rs | 73 ++++++++++++++++++++
+ 3 files changed, 178 insertions(+), 3 deletions(-)
+
+diff --git a/crates/generate/src/generate.rs b/crates/generate/src/generate.rs
+index 1dc47f2..7e53ca7 100644
+--- a/crates/generate/src/generate.rs
++++ b/crates/generate/src/generate.rs
+@@ -284,6 +284,8 @@ pub enum Diagnostic {
+     UnarySeq { name: Option<Box<str>> },
+     UnsupportedRegexFlag { flag: char, pattern: Box<str> },
+     SupertypeInlined { name: Box<str> },
++    UnreachableRule { name: Box<str> },
++    UnproductiveRule { name: Box<str> },
+ }
+ 
+ impl std::fmt::Display for Diagnostic {
+@@ -327,6 +329,19 @@ impl std::fmt::Display for Diagnostic {
+                     "rule `{name}` is both a supertype and inlined. the supertype is ignored."
+                 )?;
+             }
++            Self::UnreachableRule { name } => {
++                write!(
++                    f,
++                    "rule `{name}` is not reachable from the start rule. it was ignored."
++                )?;
++            }
++            Self::UnproductiveRule { name } => {
++                write!(
++                    f,
++                    "rule `{name}` cannot match anything: every production of it needs a rule \
++                     or token that can never match. the parser will never accept it."
++                )?;
++            }
+         }
+         Ok(())
+     }
+@@ -898,6 +913,86 @@ mod tests {
+         .unwrap();
+     }
+ 
++    /// The diagnostics a grammar produces, as `(kind, rule name)` pairs.
++    fn diagnostics_of(grammar_json: &str) -> Vec<(&'static str, String)> {
++        let mut diagnostics = Vec::new();
++        super::generate_parser_for_grammar(
++            grammar_json,
++            None,
++            super::OptLevel::default(),
++            &mut diagnostics,
++        )
++        .unwrap();
++        diagnostics
++            .iter()
++            .map(|d| match d {
++                super::Diagnostic::UnreachableRule { name } => ("unreachable", name.to_string()),
++                super::Diagnostic::UnproductiveRule { name } => ("unproductive", name.to_string()),
++                other => ("other", other.to_string()),
++            })
++            .collect()
++    }
++
++    #[test]
++    fn test_a_rule_that_nothing_reaches_is_reported() {
++        // `orphan` is dropped before table construction, so without this warning
++        // the grammar generates a parser that silently ignores it.
++        let diagnostics = diagnostics_of(
++            r#"{
++                "name": "unreachable_rule",
++                "rules": {
++                    "source_file": {"type": "SYMBOL", "name": "a"},
++                    "a": {"type": "STRING", "value": "a"},
++                    "orphan": {"type": "STRING", "value": "o"}
++                }
++            }"#,
++        );
++        assert_eq!(diagnostics, [("unreachable", "orphan".to_string())]);
++    }
++
++    #[test]
++    fn test_a_rule_that_derives_nothing_is_reported() {
++        // `a: a ok` has no base case, so no state can ever reduce to `a`. Bison
++        // calls this "nonterminal useless in grammar"; tree-sitter used to build
++        // a parser in which the rule simply never matched.
++        let diagnostics = diagnostics_of(
++            r#"{
++                "name": "unproductive_rule",
++                "rules": {
++                    "source_file": {"type": "CHOICE", "members": [
++                        {"type": "SYMBOL", "name": "a"},
++                        {"type": "STRING", "value": "ok"}
++                    ]},
++                    "a": {"type": "SEQ", "members": [
++                        {"type": "SYMBOL", "name": "a"},
++                        {"type": "STRING", "value": "ok"}
++                    ]}
++                }
++            }"#,
++        );
++        assert_eq!(diagnostics, [("unproductive", "a".to_string())]);
++    }
++
++    #[test]
++    fn test_a_healthy_grammar_has_no_unreachable_or_unproductive_diagnostics() {
++        let diagnostics = diagnostics_of(
++            r#"{
++                "name": "healthy",
++                "rules": {
++                    "source_file": {"type": "REPEAT", "content": {"type": "SYMBOL", "name": "item"}},
++                    "item": {"type": "CHOICE", "members": [
++                        {"type": "STRING", "value": "a"},
++                        {"type": "SEQ", "members": [
++                            {"type": "SYMBOL", "name": "item"},
++                            {"type": "STRING", "value": "b"}
++                        ]}
++                    ]}
++                }
++            }"#,
++        );
++        assert!(diagnostics.is_empty(), "{diagnostics:?}");
++    }
++
+     #[test]
+     fn test_a_single_unresolved_conflict_keeps_the_detailed_report() {
+         // With one conflict there is room for the item sets and the precedence that
+diff --git a/crates/generate/src/parse_grammar.rs b/crates/generate/src/parse_grammar.rs
+index 14f12e7..d7081fc 100644
+--- a/crates/generate/src/parse_grammar.rs
++++ b/crates/generate/src/parse_grammar.rs
+@@ -140,8 +140,9 @@ impl InputGrammar {
+     ///
+     /// A variable is "used" if it is the start rule, the word token, named in
+     /// `extras`/`externals`, or transitively reachable via rule references from
+-    /// any of the above.
+-    fn normalize(mut self) -> Self {
++    /// any of the above. Each variable that is dropped is reported, because the
++    /// parser would otherwise accept less than the grammar says without a word.
++    fn normalize(mut self, diagnostics: &mut Vec<Diagnostic>) -> Self {
+         // Compute the used set via forward DFS from the implicit roots
+         // (start rule, word_token, refs in extras and externals).
+         //
+@@ -190,6 +191,12 @@ impl InputGrammar {
+             .collect();
+         self.variables.retain(|v| used.contains(&v.name));
+         for &name in &dropped {
++            // The rule disappears below, so say so: a grammar author who lost a
++            // rule reference would otherwise get a parser that accepts less than
++            // the grammar says, with no hint as to why.
++            diagnostics.push(Diagnostic::UnreachableRule {
++                name: self.pool.resolve(name).into(),
++            });
+             self.conflict_names.retain(|c| !c.contains(&name));
+             self.supertype_names.retain(|&s| s != name);
+             self.inline_names.retain(|&s| s != name);
+@@ -312,7 +319,7 @@ pub(crate) fn parse_grammar(
+         word_name,
+         precedence_orderings,
+     }
+-    .normalize();
++    .normalize(diagnostics);
+     Ok(grammar)
+ }
+ 
+diff --git a/crates/generate/src/prepare_grammar.rs b/crates/generate/src/prepare_grammar.rs
+index 11168d4..ea1614d 100644
+--- a/crates/generate/src/prepare_grammar.rs
++++ b/crates/generate/src/prepare_grammar.rs
+@@ -153,6 +153,7 @@ pub fn prepare_grammar(
+     let mut out = ProductionStore::default();
+     flatten_grammar(&g, &ext_meta, &mut state, &mut out)?;
+     validate_indirect_recursion(&g, &out)?;
++    diagnose_unproductive_rules(&g, &out, diagnostics);
+     validate_extras(&g, &ext_meta.extra_symbols, &lexical_grammar, &out)?;
+ 
+     let default_aliases =
+@@ -169,6 +170,78 @@ pub fn prepare_grammar(
+     })
+ }
+ 
++/// Report rules that can never match anything.
++///
++/// A rule is productive when one of its productions needs only productive steps:
++/// a token always consumes at least one byte, and an external token's scanner
++/// decides for itself, so both count as productive. A rule whose every
++/// production needs a rule that can never match derives no sentence, and no
++/// parser state can ever reduce to it — which is the usual shape of a rule that
++/// lost its base case (`a: a b;` with no `a: b;`) or needs a token that nothing
++/// lexes. Bison reports the same input as "nonterminal useless in grammar";
++/// without it, such a grammar generates a parser, and the rule silently never
++/// appears in a tree.
++///
++/// The worklist makes this linear in the number of steps: a rule becomes
++/// productive when one of its productions has no unproductive steps left, and
++/// each production is revisited once per rule it mentions.
++fn diagnose_unproductive_rules(
++    grammar: &InputGrammar,
++    productions: &ProductionStore,
++    diagnostics: &mut Vec<Diagnostic>,
++) {
++    let rule_count = productions.var_prods.len();
++
++    // The rule that owns each production, so a production can make its owner
++    // productive, and, for each rule, the productions that name it.
++    let mut owner = vec![0u32; productions.productions.len()];
++    for (index, &(start, end)) in productions.var_prods.iter().enumerate() {
++        owner[start as usize..end as usize].fill(index as u32);
++    }
++    let mut mentions = vec![Vec::new(); rule_count];
++    let mut unmet = Vec::with_capacity(productions.productions.len());
++    for (id, production) in productions.productions.iter().enumerate() {
++        let mut count = 0;
++        for step in &productions.steps[production.step_range()] {
++            if let SymbolView::NonTerminal(index) = step.symbol().view() {
++                count += 1;
++                mentions[usize::from(index)].push(id as u32);
++            }
++        }
++        unmet.push(count);
++    }
++
++    let mut productive = BitVec::new();
++    productive.resize(rule_count, false);
++    let mut queue: Vec<u32> = (0..unmet.len() as u32)
++        .filter(|&id| unmet[id as usize] == 0)
++        .collect();
++    while let Some(id) = queue.pop() {
++        let rule = owner[id as usize] as usize;
++        // The owner was made productive by an earlier production of its own, and
++        // that is when every production naming it was marked.
++        if productive.get(rule) == Some(true) {
++            continue;
++        }
++        productive.set(rule, true);
++        for &other in &mentions[rule] {
++            let left = &mut unmet[other as usize];
++            *left -= 1;
++            if *left == 0 {
++                queue.push(other);
++            }
++        }
++    }
++
++    for (index, variable) in grammar.variables.iter().enumerate() {
++        if productive.get(index) != Some(true) {
++            diagnostics.push(Diagnostic::UnproductiveRule {
++                name: grammar.pool.resolve(variable.name).into(),
++            });
++        }
++    }
++}
++
+ /// Check for indirect recursion cycles in the grammar that can cause infinite loops while
+ /// parsing. An indirect recursion cycle occurs when a non-terminal can derive itself through
+ /// a chain of single-symbol productions (e.g., A -> B, B -> A).
+-- 
+2.55.0
+

@@ -1,0 +1,7 @@
+// test/fixtures/test_grammars/basic_cst/grammar.js
+%name basic_cst;
+
+document: assignment;
+assignment: field(name, identifier) '=' field(value, number);
+identifier: /[a-z]+/;
+number: /[0-9]+/;

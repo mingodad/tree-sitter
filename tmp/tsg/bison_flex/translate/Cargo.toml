@@ -1,0 +1,20 @@
+[package]
+name = "g2tsg"
+version = "0.1.0"
+edition = "2021"
+description = "Read a joined Bison/Flex .g file with the tree-sitter grammar in bison_flex/grammar.tsg"
+license = "MIT"
+
+# Standalone workspace root, like ../Cargo.toml, so this crate is not pulled
+# into the enclosing tree-sitter cargo workspace.
+[workspace]
+
+[[bin]]
+name = "g2tsg"
+path = "src/main.rs"
+
+[build-dependencies]
+cc = "1"
+
+[dependencies]
+tree-sitter = { path = "../../../../lib" }

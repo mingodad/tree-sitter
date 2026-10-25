@@ -1,0 +1,11 @@
+# Token bodies that Flex syntax cannot express, hand-written from the Flex
+# rules in ../postgres16.g (see README.md).  A token that is not listed here
+# takes its pattern from the lexer rules.
+#
+# `Op` and `SCONST` need Flex's alternation and quote handling spelled out,
+# `IDENT` needs the doubled-quote form of quoted identifiers, and `FCONST`
+# merges the source's two float rules.
+Op      (\|\||->>|->|#>>|#>|@>|<@|\?\||\?&|\?)
+SCONST  '((''|[^']))*'
+IDENT   ([A-Za-z\x80-\xff_][A-Za-z\x80-\xff_0-9$]*|\"((\"\"|[^\"]))*\")
+FCONST  ([0-9]*\.[0-9]+|[0-9]+\.[0-9]*)([Ee][-+]?[0-9]+)?

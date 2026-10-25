@@ -1,0 +1,20 @@
+// A `tokens { … }` block: one rule is one token, and the section's place in the
+// file is token priority order. `@immediate` is the spelling of
+// `token.immediate`, and a declaration can wrap a choice or a sequence that
+// would otherwise be several tokens.
+//
+// The block is syntax sugar for `token(…)`, so this file must compile to the
+// same JSON as the call spelling (see the unit test in src/compile.rs).
+
+%name tokens;
+%extras none;
+%word NAME;
+
+tokens {
+    NAME: /[A-Za-z_][A-Za-z0-9_]*/;
+    NUMBER: '-' /[0-9]+/ @immediate;
+    PUNCT: '+' | '-';
+    FUSED: '--' /[a-z]+/;
+}
+
+start: NAME | NUMBER | PUNCT | FUSED;

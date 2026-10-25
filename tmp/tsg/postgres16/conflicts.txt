@@ -1,0 +1,13 @@
+# Conflicts, all translation artifacts (Bison's grammar has none).
+utility_option_name unreserved_keyword
+simple_select
+a_expr
+target_el
+opt_frame_clause unreserved_keyword
+ConstDatetime col_name_keyword
+table_ref
+OptTempTableName unreserved_keyword
+a_expr bare_label_keyword
+ConstDatetime
+b_expr
+func_table
