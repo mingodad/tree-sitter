@@ -895,6 +895,12 @@ cannot be joined, and the short list I would actually implement next.
 
 ## Open items, in the order I would do them
 
+**For anything about authoring, `ROADMAP.md` overrides the order below.**  It is
+organized by one criterion — "an author writes what the language is, and never
+works around the tool" — and it explicitly drops JS-DSL parity and stock
+tree-sitter compatibility as goals.  Read it first; the list below is the older,
+broader backlog (CLI integration, editor story, EBNF surface, modularity).
+
 1. **Wire it into the CLI** (`tree-sitter generate grammar.tsg`) or move the
    front end to `crates/generate/src/declarative/` — the prototype's only contract
    is emitting `grammar.json`, so this is a mechanical move.
