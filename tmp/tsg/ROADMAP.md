@@ -84,8 +84,15 @@ generated table (`lex_modes[state].lex_state` is one value, no stack): it is
 compiled to an external scanner, whose `serialize`/`deserialize` payload *is*
 stored in the subtree.  That gives a genuine stack, `valid_symbols` (what the
 parse expects, which the internal lexer never sees), and `advance` + `mark_end`
-for arbitrary lookahead.  One lexer, many states, every token external — the
-Flex model, and the only one that compiles to ABI-15 code.
+for arbitrary lookahead.  The boundary is decided by whether the block needs that
+stack, not by taste: a block with no state action compiles to the internal DFA
+(exactly a `tokens` block, no scanner, no incremental cost) and a block with any
+state action *is* the lexer, every token external — the Flex model, and the only
+one that compiles to ABI-15 code.  Mixed mode was considered and dropped:
+`LEXER.md` §1.5 measures the external and internal lexers disagreeing around
+extras.  For the same reason a block's trivia (comments) compiles to external
+*extra* tokens that its scanner returns, which is also the only shape that keeps
+comment nodes in the tree.
 
 - Where: new `src/lexer_dsl.rs` in `tsg` (parse + compile to C), extend
   `src/scanner.rs`, keep `delimited(…)` as sugar for the balanced case.

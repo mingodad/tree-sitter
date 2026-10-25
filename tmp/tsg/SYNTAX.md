@@ -87,6 +87,14 @@ What the generated scanner does, exactly:
   compile time with the tokens that are affected: a `{` that comes right after
   a `/* … */` is not recognised, because the scanner never sees it. Put the
   delimiter where only whitespace can precede it, or write `src/scanner.c`.
+  **Measured, and worse than "not recognised"** (2025-10-25): with a comment
+  extra, `{ a } /*x*/ { b }` comes back as `(document [0,0]-[0,5] (region …))`
+  with **exit 0** — the input after the comment is accepted and ignored, and
+  `{ a } /*x*/ $$$` behaves the same way. A leading comment is an `ERROR` at
+  `[0,0]`. The fix is `LEXER.md` step 0b: declare the extra as an external
+  token the generated scanner returns, which parses all three inputs and keeps
+  the comment as a node. Until then, do not put a region after a comment in a
+  grammar whose extras are internal.
 * It counts nesting, so `{ a { b } c }` is one token, and the depth is a local
   variable: a delimited region is one token, so nothing has to be serialized
   and no state survives between tokens.

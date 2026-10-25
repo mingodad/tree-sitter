@@ -1,0 +1,225 @@
+// A tree-sitter grammar translated from xmc-model-checker.g.
+// Translated by g2tsg from xmc-model-checker.g (read with bison_flex/grammar.tsg).
+
+%name xmc;
+%start prog;
+
+tokens {
+  AND: /\/\\/;
+  ASSIGN: /:=/;
+  CHANNEL: /channel/;
+  DEFINE: /::=/;
+  DIAM_ALL: /<\->/;
+  DIAM_MINUS: /<\-/;
+  DIV: /\/\//;
+  ELSE: /else/;
+  EQ_EQ: /==/;
+  FALSE: /ff/;
+  FROM: /from/;
+  GREATER_EQ: />=/;
+  ID: /'[^']*'|([a-z])([a-zA-Z0-9_])*/;
+  IF: /if/;
+  INT_CONST: /([0-9])+/;
+  IS: /is/;
+  LESSER_EQ: /<=|=</;
+  MINUS_EQ: /\-=/;
+  MOD: /mod/;
+  NOT_EQ: /\\=/;
+  NOT_EQ_EQ: /\\==/;
+  OR: /\\\//;
+  PLUS_EQ: /\+=/;
+  PREDICATE: /predicate/;
+  PREF: /o/;
+  THEN: /then/;
+  TRUE: /tt/;
+  VAR: /([A-Z_])([a-zA-Z0-9_])*/;
+}
+
+%extra /[ \t\r\n]+/;
+%extra /%.*/;
+%extra /\/\*(?s:.)*?\*\//;
+%extra /\{\*(?s:.)*?\*\}/;
+
+// Bison lists precedence lowest first; tsg wants the descending chain.
+// `nonassoc` becomes a level with no associativity (see the notes above).
+%precedence left "p15" = ',' ':';
+%precedence "p14" = '?' '!';
+%precedence left "p13" = '*' MOD '/' DIV;
+%precedence left "p12" = '+' '-';
+%precedence "p11" = EQ_EQ NOT_EQ '=' NOT_EQ_EQ '>' '<' GREATER_EQ LESSER_EQ;
+%precedence "p10" = ELSE;
+%precedence "p9" = THEN;
+%precedence right "p8" = PREF ';';
+%precedence right "p7" = '|';
+%precedence right "p6" = '#';
+%precedence "p5" = '[' ']' DIAM_ALL;
+%precedence "p4" = '~';
+%precedence left "p3" = AND;
+%precedence left "p2" = OR;
+%precedence "p1" = ASSIGN IS;
+
+
+// Bison named the start symbol with `%start`.
+// The start rule is written first.
+
+prog:
+    spec+;
+
+spec:
+    pdefn
+  | preddecl
+  | cdecl
+  | fdefn;
+
+preddecl:
+    PREDICATE predlist FROM ID '.'
+  | PREDICATE predlist '.';
+
+predlist:
+    predtype (',' predtype)*;
+
+predtype:
+    ID
+  | ID '(' predtypelist ')';
+
+predtypelist:
+    type (',' type)*;
+
+cdecl:
+    CHANNEL ID '.'
+  | CHANNEL ID '(' vardecllist ')' '.';
+
+vardecllist:
+    vardecl (',' vardecl)*;
+
+vardecl:
+    VAR
+  | VAR ':' type;
+
+type:
+    ID
+  | VAR
+  | ID '(' typelist ')';
+
+typelist:
+    type (',' type)*;
+
+pdefn:
+    pname DEFINE pexp '.';
+
+pname:
+    ID '(' vardecllist ')'
+  | ID;
+
+pexp:
+    exp
+  | cname '?' term
+  | cname '?' '*'
+  | cname '!' term
+  | cname '!' '*'
+  | IF exp THEN pexp ELSE pexp
+  | IF exp THEN pexp
+  | pexp PREF pexp
+  | pexp ';' pexp
+  | pexp '#' pexp
+  | pexp '|' pexp
+  | '{' pexp '}';
+
+cname:
+    vardecl
+  | ID;
+
+term:
+    ID '(' explist ')'
+  | ID
+  | vardecl
+  | INT_CONST
+  | '[' ']'
+  | '[' termlist ']'
+  | '[' termlist '|' term ']'
+  | '(' term ',' termlist ')';
+
+termlist:
+    term (',' term)*;
+
+explist:
+    exp (',' exp)*;
+
+exp:
+    term
+  | '+' exp
+  | '-' exp
+  | '~' exp
+  | exp '+' exp
+  | exp '-' exp
+  | exp '*' exp
+  | exp MOD exp
+  | exp DIV exp
+  | exp '/' exp
+  | exp '<' exp
+  | exp '>' exp
+  | exp GREATER_EQ exp
+  | exp LESSER_EQ exp
+  | exp '=' exp
+  | exp EQ_EQ exp
+  | exp NOT_EQ exp
+  | exp NOT_EQ_EQ exp
+  | exp AND exp
+  | exp OR exp
+  | exp ASSIGN exp
+  | exp IS exp
+  | '(' exp ')';
+
+fdefn:
+    fterm PLUS_EQ fexp '.'
+  | fterm MINUS_EQ fexp_ng '.';
+
+fterm:
+    ID '(' vardecllist ')'
+  | ID;
+
+fexp:
+    fexp AND fexp
+  | fexp OR fexp
+  | '<' modality '>' fexp
+  | DIAM_ALL fexp
+  | DIAM_MINUS modality '>' fexp
+  | '[' modality ']' fexp
+  | TRUE
+  | FALSE
+  | fterm
+  | '(' fexp ')';
+
+fterm_ng:
+    ID '(' vardecllist ')'
+  | ID;
+
+fexp_ng:
+    fexp_ng AND fexp_ng
+  | fexp_ng OR fexp_ng
+  | '<' modality '>' fexp_ng
+  | DIAM_ALL fexp_ng
+  | DIAM_MINUS modality '>' fexp_ng
+  | '[' modality ']' fexp_ng
+  | TRUE
+  | FALSE
+  | fterm_ng
+  | '(' fexp_ng ')';
+
+modality:
+    '-' posmodal
+  | '-'
+  | posmodal;
+
+posmodal:
+    unit
+  | '{' unitlist '}';
+
+unit:
+    ID '(' unitlist ')'
+  | ID
+  | VAR
+  | INT_CONST;
+
+unitlist:
+    unit (',' unit)*;

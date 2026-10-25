@@ -3,13 +3,27 @@
 This is the design for ROADMAP item 2, written so that a session which has never
 touched the lexer can start at step 0 and stop at any step boundary.
 
-**Status: design, nothing implemented.** Sections 4 and 12 list the decisions
-that are *proposed* (my recommendation, with the alternative). Anything marked
-*decided* is what I would implement as written; anything marked *open* needs an
-answer before the step that depends on it.
+**Status: design v2, nothing implemented.** v1 was reviewed against the project's
+one criterion — *an author writes what the language is, and never works around
+the tool* (`ROADMAP.md`) — and four decisions changed, one of them because a new
+measurement (§1.5) showed the current mechanism is worse than it looks. Sections
+4 and 12 list what is *proposed*; anything marked *decided* is what I would
+implement as written; anything marked *open* needs an answer before the step that
+depends on it.
 
 The rule for this file: when a step changes a decision, change it here in the
 same commit. A design doc that disagrees with the code is worse than none.
+
+## What changed from v1, and why
+
+| v1 | v2 | evidence |
+|---|---|---|
+| D1 "mixed mode": external and internal lexers side by side, external always wins | **mode by need**: no state action ⇒ the block *is* a `tokens` block (internal DFA); any state action ⇒ the block is the lexer, all of its tokens external | §1.5: the two lexers do not currently cooperate; and `ROADMAP.md` §2 already said "every token external" |
+| pattern language defined for the block (`STRING \| REGEX`) | **the `tokens`-block language, verbatim** — same `Expr` AST, same flags, same priority rule | one dialect, one place to be wrong; `lexing.rs` already validates token bodies |
+| `%extra` handled by the author, `extras-in-lexer` reported | **extras compiled into the scanner** as external extra tokens; the warning goes away | §1.5: measured, and it is the *only* combination that works |
+| zero-width patterns rejected outright | **legal iff the serialized state changed**, not an extra, not in error recovery | `parser.c:562-594` is the Python indent/dedent model, which v1 cited and then contradicted |
+| trailing context `r/s` refused (D7) | **`when(…)`, step 4** | `HANDOFF.md` gap 4 (`WITH_LA`/`NULLS_LA`/`NOT_LA`) |
+| engine (step 2) before states (step 3) | unchanged in order, but the reason is now stated: the engine's gate is `--stamp` identity, which is exact, and nothing user-visible lands until step 3 | §7 |
 
 ---
 
@@ -36,21 +50,24 @@ that tree-sitter's lexer cannot hold. `%lexer` is the general form of it.
 
 | Fact | Where |
 |---|---|
-| The external scanner runs **first** for a token; if `scan` returns `false` the internal DFA runs at the same position | `lib/src/parser.c:539-560`, then `ts_lexer_reset` + `main_lex_fn` at `:600` |
+| The external scanner runs **first** for a token; if `scan` returns `false` the internal DFA runs at the same position | `lib/src/parser.c:535-600` |
 | `valid_symbols` is the set of external tokens *this lex mode* can accept, precomputed at generate time | `parser.c:458`, `ts_language_enabled_external_tokens` |
 | The scanner state is stored **in the subtree** and restored per stack version, so it survives GLR backtracking and internal tokens in between | `parser.c:549`, `ts_parser__external_scanner_deserialize`, `ts_subtree_external_scanner_state` |
-| A `true` return with **no consumed byte** is allowed when the serialized state changed, and ignored otherwise (the Python indent/dedent model) | `parser.c:562-594`, "Avoid infinite loops caused by the external scanner returning empty tokens" |
-| The serialize buffer is 1024 bytes | `lib/src/parser.h:14` |
+| A `true` return with **no consumed byte** is allowed when the serialized state changed; it is dropped when the token is an `extra` or during error recovery | `parser.c:562-594` |
+| The serialize buffer is `TREE_SITTER_SERIALIZATION_BUFFER_SIZE` = 1024 bytes | `lib/src/parser.h:14` |
 | `mark_end` may be called repeatedly, so longest-match-with-backtracking is expressible; `advance(skip=true)` consumes without extending the token | `lib/src/lexer.c:275-300` |
 | A token lexed in a state whose lex mode allows externals is **not** reusable for incremental reparse | `ts_parser__can_reuse_first_leaf`, `parser.c:471` |
 
-Two consequences worth stating up front, because they decide the architecture:
+Three consequences decide the architecture, and the third is new:
 
-1. **Mixed mode is native.** An external scanner and the internal lexer coexist;
-   the external one gets the first refusal. We do not have to make every token
-   external to get state.
-2. **The payload must be canonical.** It is hashed into the subtree and compared
-   across reparses: same stack, same bytes, always.
+1. **A state machine is expressible** and the payload must be canonical (it is
+   hashed into the subtree and compared across reparses: same stack, same bytes,
+   always).
+2. **A syntax tree keeps extras as nodes.** A comment that the scanner silently
+   swallows is a comment no query will ever see. Trivia handling is therefore not
+   a performance detail; it changes the tree.
+3. **The external and internal lexers do not currently cooperate around extras.**
+   See §1.5. This is why v2 does not ship mixed mode.
 
 ### Why the internal lexer cannot do it
 
@@ -61,6 +78,44 @@ braces), or a mode entered by one token and left by another (`%%` starting the
 rules, a second `%%` starting the epilogue), is not a function of the parse
 state at all. Flex's `<<>`/`<>` are exactly this, and there is nowhere to put it.
 That is the whole reason `%lexer` compiles to C instead of to tables.
+
+### 1.5 What the current mechanism actually does with extras (measured)
+
+Seven probes (2025-10-25, patched CLI in `bin/`). The grammar is the same in
+every one: one external region `delimited('{','}')`, `document: region+`, and a
+`/* … */` comment extra. The only thing that changes is how the comment is
+declared — the first column of the table — and that is the whole finding. Each
+row is one `tsg -o` + `tree-sitter generate` + `build` + `parse` run.
+
+| extra declared as | input | result |
+|---|---|---|
+| bare pattern `%extra /\/\*…\*\//;` | `{ a } { b }` | **ok**, two regions |
+| same | `/* c */ { a }` | `ERROR` at `[0,0]` (the documented limit) |
+| same | `{ a } /*x*/ { b }` | **silently truncated**: `(document [0,0]-[0,5] (region …))`, **exit 0** — the rest of the file is accepted and ignored |
+| same | `{ a } /*x*/ $$$` | same truncation, **exit 0**: garbage silently accepted |
+| rule reference `%extra comment;` | `{ a }` | `ERROR` around a region — the external token is not in the start state's valid set |
+| **external extra token** `%external comment; %extra comment;` | `{ a } /*x*/ { b }` | **ok**: `(document (region) (comment) (region))`, comment node present, no ERROR |
+| same | `/*x*/ { a }` | **ok**, leading comment is a node |
+
+The last two rows are a hand-written 30-line scanner with the comment as a
+*second external token that is also an extra*. Everything works: leading
+comments, comments between regions, and the comment survives as a tree node.
+Nothing else does.
+
+Two conclusions, and only the first is about `tsg`:
+
+* **A block's trivia must be external extra tokens, not internal extras.** The
+  scanner must return the comment itself, in every state, before trying the
+  state's patterns. That is also the only shape that keeps comment *nodes*, which
+  a skip-in-the-scanner would lose.
+* **The truncation is a runtime/generator bug** (ACCEPTS-A-PREFIX, exit 0, for an
+  external token followed by an internal extra) and should be reported upstream
+  with the four inputs above. It is not `tsg`'s, but `tsg` must not route around
+  it by silence: `SYNTAX.md`'s `delimited` note currently understates the failure
+  ("a `{` that comes right after a `/* … */` is not recognised" — true, but the
+  parse then *succeeds* on a prefix, which is worse). Cause not yet identified;
+  **step 0b** is to fix the mechanism for `tsg` (extras as external tokens) and to
+  characterise the runtime bug well enough to file it.
 
 ---
 
@@ -76,27 +131,45 @@ state-group := states? "{" <rule>* "}"        // states omitted = INITIAL
 states      := name                       // "RULES"
              | "<" name ("," name)* ">"    // "<RULES,ACTION>"
 
-rule        := pattern <modifier>* "->" action ";"
-modifier    := "caseless" | "eof" | "immediate"
-pattern     := STRING | REGEX             // same literals and /…/ the tokens block uses
+rule        := body <modifier>* ( "when" "(" body ")" )? "->" action ";"
+modifier    := "eof"
+body        := <the same expression a `tokens { … }` entry may have>
 
 action      := "return" TOKEN             // return TOKEN, state unchanged
-             | "push" "(" TOKEN ")"       // push the current state, return TOKEN
-             | "pop"                      // pop, no token
-             | "pop" "(" TOKEN ")"        // pop, return TOKEN
              | "enter" "(" STATE ")"      // switch state, no token
-             | "reject"                   // take the next-best pattern, same position
-             | "yyless" "(" NUMBER ")"    // shorten the match to NUMBER characters
+             | "push" "(" STATE ")"       // push the current state, switch to STATE
+             | "pop"                      // restore the pushed state, no token
+             | "pop" "(" TOKEN ")"        // restore it, return TOKEN
+             | "skip"                     // consume the match, keep scanning here
+             | "reject"                   // take the next-best candidate, same position
              | "rest"                     // consume to end of input
+             | "yyless" "(" NUMBER ")"    // shorten the match to NUMBER characters
 ```
+
+**The pattern language is the `tokens`-block language** — the same `Expr` AST the
+parser already builds, so `/…/i`, `'…'`, `\x41`, character classes and the
+parser's own validation are shared with the thing the author already knows.
+`@immediate` is refused inside a block (`every pattern in a block is matched
+after the block's own trivia`) rather than being given a second meaning.
 
 Every `TOKEN` a block returns becomes an external token; `grammar.json`'s
 `externals` order is the order of first mention, and that order is part of the
-contract (the generator indexes it, `scanner.c`'s enum must match).
+contract (the generator indexes it, `scanner.c`'s enum must match). A name
+starting with `_` is a hidden node, exactly as in a `tokens` block — that is how
+`tsg` keeps a bare `%extra` pattern a non-node.
 
-Actions are a fixed vocabulary, **not C**. That is the point of the item: an
-author says what the language is. A lexer whose actions are C is a scanner with
-a prettier filename.
+**Trivia is part of the block, and `tsg` writes it.** The scanner is called
+before the runtime skips extras, and §1.5 shows the runtime's own extras path is
+not usable between two external tokens. So `tsg`:
+
+* skips whitespace inside the scanner (only characters that the grammar's extras
+  say are whitespace — `/\s/`, `/[ \t]+/`, `%extras none` ⇒ none);
+* turns each *other* extra into a token of the block, declared in `"extras"` and
+  in `"externals"`, whose action is `return` — the author never writes them, and
+  comments keep appearing in the tree;
+* reports (does not silently drop) any extra it cannot express that way: a
+  nonterminal extra whose body is not a token, or an extra that can match
+  nothing (`lexer-extra-unrepresentable`).
 
 ### Worked example: bison.g's three start conditions
 
@@ -118,29 +191,50 @@ The target `.tsg`:
 %lexer {
   // INITIAL is the prologue: `%{ … %}` and the declaration lines.
   INITIAL {
-    "%{"          -> push(PROLOGUE);
-    "%%"          -> enter(RULES);
-    /[a-z][a-z_]*/ caseless -> return IDENT;
+    "%{"                -> push(PROLOGUE);
+    "%%"                -> enter(RULES);
+    /[a-z][a-z_]*/i     -> return IDENT;
   }
 
   RULES {
-    "{"           -> push(ACTION);   // the depth lives in the state stack
-    "%%"          -> enter(EPILOGUE);
-    /[a-z][a-z_]*/ caseless -> return IDENT;
+    "{"                 -> push(ACTION);   // the depth lives in the state stack
+    "%%"                -> enter(EPILOGUE);
+    /[a-z][a-z_]*/i     -> return IDENT;
   }
 
   // An action body is one token; nested braces stack, so no counting is needed
   // outside the scanner.
   ACTION {
-    "{"           -> push(ACTION);
-    "}"           -> pop(ACTION_CODE);
+    "{"                 -> push(ACTION);
+    "}"                 -> pop(ACTION_CODE);
+    /[^{}]+/            -> skip;
   }
 
   // Everything after the second `%%` is C, to the end of the file. This is the
   // token that `delimited(…)` cannot express and that the translator drops
   // today with "not a balanced region".
   EPILOGUE {
-    rest          -> return EPILOGUE;
+    rest                -> return EPILOGUE;
+  }
+}
+```
+
+And the thing `delimited(…)` provably cannot do, which needs no new machinery —
+a brace inside a string stops ending the region:
+
+```tsg
+%lexer {
+  INITIAL { "{"  -> push(BODY); }
+  BODY {
+    "\""             -> push(STRING);
+    "{"              -> push(BODY);
+    "}"              -> pop(BODY_TOKEN);
+    /[^{}"]+/        -> skip;
+  }
+  STRING {
+    /[^"\\]+/        -> skip;
+    /\\[\s\S]/       -> skip;
+    "\""             -> pop;
   }
 }
 ```
@@ -153,126 +247,151 @@ The target `.tsg`:
 lexer uses, so a `%lexer` block reads like a `tokens` block. Concretely: the
 scanner consumes as far as any pattern of the current state can match, and among
 the patterns accepting at the longest length, the earliest declared wins (order
-is per state group, top to bottom, groups in file order).
-
-**Whitespace is the scanner's business, and `tsg` writes it.** The scanner runs
-*before* extras are skipped (that is why `tsg_scan_delimited` starts with a
-space loop). So every state pattern is matched *after* skipping leading
-whitespace, emitted as `while (is_space(lookahead)) advance(lexer, true)`.
-Which characters count as space is derived from the grammar's `%extra` patterns
-when they are pure whitespace (`/\s/`, `/[ \t]+/`); if `%extra` contains anything
-else (a comment pattern), the scanner cannot skip it and `tsg` reports
-`extras-in-lexer` with the pattern, rather than silently disagreeing with the
-internal lexer about what a comment is.
+is per state group, top to bottom, groups in file order). Trailing context
+(`when(…)`) shortens the *consumed* part to the main pattern: the right context
+is matched but not consumed.
 
 **`valid_symbols` is a filter, not a hint.** Before returning, the scanner checks
 `valid_symbols[TOKEN]`; if it is false the scan of that pattern is abandoned and
-the next candidate is tried. A `%lexer` block therefore never returns a token the
-parse state cannot accept, which is what makes a scanner usable at all (the
-internal lexer gets this for free from `lex_modes`).
+the next candidate is tried. This is not a `%lexer` invention: the internal
+lexer's per-lex-state DFA is built from the same valid-token set, so "longest
+match among the tokens this state can accept" is the *same rule* in both worlds.
+That is what makes D1's split (stateless ⇒ internal DFA) semantically invisible,
+and it is step 2's main test.
 
-**A state change with no consumed byte is legal** — `enter`/`pop` return `true`
-with 0 bytes consumed, and the runtime accepts it because the serialized payload
-changed (`parser.c:562-594`), which is exactly the sanity check that prevents
-loops. `tsg` must therefore serialize the stack *before* comparing: `enter` is
-only expressible because of this rule.
+**Trivia runs first, in every state, and is not part of the language's tokens.**
+Whitespace is skipped (`advance(skip=true)`); every other extra is an external
+token returned before any state pattern is tried, so it lands in the tree as an
+extra node. A state pattern that ties with an extra loses: trivia is not a token.
 
-**Priority against internal tokens is: external first.** In mixed mode a
-`%lexer` pattern that matches the same text as an internal token wins, always,
-whatever the declaration order says. This is a real semantic difference from
-Flex and it is why §4 D1 is a decision rather than a detail: `tsg` reports an
-overlap (`lexer-overlaps-internal`) with both names when it can detect one.
+**A state change is legal with no consumed byte** — `enter`/`push`/`pop` return
+`true` with 0 bytes consumed, and the runtime accepts it because the serialized
+payload changed (`parser.c:562-594`), which is exactly the sanity check that
+prevents loops. `tsg` must therefore serialize the stack *before* comparing, and
+must not mark such a token as an extra.
 
-**A pattern that can match the empty string is rejected at compile time.** Not a
-warning: a zero-length match that also leaves the state unchanged is an infinite
-loop, and a hang is the worst failure there is. (`rest` at EOF is the same
-shape — it is allowed *only* because it changes nothing and returns at most
-`true` once per position; it is written as `rest` precisely so that it cannot be
-confused with a regex.)
+**A zero-width *token* is legal only with a state change.** That is the same
+runtime rule, and it is the Python `INDENT`/`DEDENT` model: `"}" -> pop(DEDENT);`
+consumes nothing and returns a token. A pattern that can match nothing *and*
+leaves the state alone is rejected at compile time (`lexer-zero-width`): it is an
+infinite loop, and a hang is the worst failure there is. (`rest` at end of input
+is the one allowed shape — it returns `true` at most once per position, and the
+runtime drops the empty token.)
+
+**`reject` re-considers, it does not re-run.** The matcher already produces the
+candidate list to implement longest-match, so `reject` means "mark the current
+candidate refused and continue" — second-longest pattern, then third.
+
+**Depth is bounded by the payload, and the bound is reported.** The stack is one
+byte per frame (§4 D3); a grammar with more than 255 states is rejected at compile
+time (`lexer-depth`), and a push past the buffer's capacity fails the scan, which
+becomes an ordinary `ERROR`/`MISSING` rather than a crash.
 
 ---
 
 ## 4. Decisions
 
-### D1 — mixed mode or every token external — *proposed: mixed*
+### D1 — mode by need: stateless ⇒ internal DFA, stateful ⇒ the block is the lexer — *decided*
 
-| | mixed | all external |
-|---|---|---|
-| author can keep `tokens { … }` for the ordinary stuff | yes | no |
-| internal lexer stays the fast path | yes | no |
-| incremental reparse of ordinary tokens keeps the fast path | yes | no (`can_reuse_first_leaf`) |
-| Flex translation | per state group | all-or-nothing |
-| extra machinery | overlap detection + report | none extra |
-| risk | external-vs-internal priority surprise | performance, ABI-16 temptation |
+| block contains | compiled to | `grammar.json` | cost |
+|---|---|---|---|
+| no `enter`/`push`/`pop` | the internal DFA — i.e. exactly a `tokens { … }` block | token rules as usual, `externals: []` | none: incremental reparse and the fast path are untouched |
+| any state action | `scanner.c`; every token of the block is external, and the block is the *whole* lexer | `externals: [SYMBOL …]`, no rules entries (this is what every `dsl.js` grammar with externals looks like) | external tokens are not reusable across reparses (`can_reuse_first_leaf`) |
 
-Recommendation: mixed. It is what the runtime already does, it keeps the item
-small enough to land in steps, and "external wins" is a *reported* rule rather
-than a silent one. The all-external model is available later by simply writing
-everything in the block.
+v1 proposed mixed mode. §1.5 killed it: the two lexers disagree around extras
+today, and "external always wins, whatever the declaration order says" is exactly
+the kind of invisible rule the project exists to delete. The rule now is the one
+an author can hold in their head: *one lexer*; whether it is a table or a scanner
+is `tsg`'s problem, decided by whether the block needs a stack.
 
-### D2 — how patterns become C — *proposed: tsg builds a DFA*
+Consequences to implement in the same step:
 
-1. **per-state NFA → DFA, emitted as C tables** (recommended). `tsg` already
-   treats patterns as opaque strings; this needs a real regex parser (character
-   classes, ranges, escapes, `.`, `* + ?`, `|`, groups; non-greedy → refused),
-   Thompson construction, subset construction per state, then the same table
-   shape tree-sitter generates for its own lexer (`char_classes` shared across
-   states, one dense row per state, plus a per-accepting-position list of pattern
-   indices so `reject` can walk the candidates). ~700–900 lines with tests.
-2. **backtracking matcher emitted per pattern.** Cheap to write, catastrophic
-   backtracking is possible, longest-match/tie logic has to be reinvented.
-   Rejected: a hang is the worst failure.
-3. **literals and classes only for now, regexes later.** Half a lexer that
-   silently disagrees with Flex. Rejected.
+* a stateful block ⇒ every token of the grammar must be declared in it
+  (`lexer-token-outside-block` names the token and the block, with `%word` and
+  `%reserved` tokens included). `lexing.rs` already answers "is this a token".
+* a stateful block ⇒ `%external NAME;` (hand-written) and `%external … = delimited(…)`
+  cannot coexist, because there is one `scanner.c`: refused with a sentence
+  saying which to keep. When `%lexer` can express everything, `delimited` becomes
+  sugar (D6).
+* `--from-json` cannot reconstruct a block, as it cannot reconstruct
+  `delimited(…)` today (`SYNTAX.md:480`); the note grows one sentence.
 
-The DFA is the same idea as `ts_lex`, written in `tsg` because `tsg` stays
-dependency-free and emits C into the grammar directory.
+### D2 — how patterns become C: `tsg` builds a DFA — *decided*
 
-### D3 — serialization — *proposed: version byte + one byte per state*
+1. **per-state NFA → DFA, emitted as C tables** (recommended). The pattern is
+   already an `Expr`; a real regex parser (classes, ranges, escapes, `.`,
+   `* + ?`, `|`, groups; non-greedy refused) → Thompson → subset construction per
+   state → the same table shape tree-sitter generates for its own lexer (shared
+   character classes, one dense row per state, and a per-accepting-position list
+   of pattern indices so `reject` can walk candidates). ~700–900 lines with tests.
+2. backtracking matcher per pattern — rejected: catastrophic backtracking is
+   possible, and a hang is the worst failure.
+3. literals and classes only — rejected: half a lexer that silently disagrees.
+
+There is **no** existing NFA in `tsg` to reuse (`src/lexing.rs` classifies and
+reports token bodies; it does not compile them), so the estimate stands — this is
+the piece to time-box.
+
+The gate is *not* "looks the same on fixtures". One pattern set is compiled twice
+(block vs `tokens` block) and compared on a corpus that is exhaustive over each
+pattern's own alphabet, including `caseless`, `\s`, `.`, negated classes, `\x`,
+byte escapes and the parenthesised form `tsg` emits for translated Flex patterns.
+`[\x0000-\x001F]` is the known trap (HANDOFF gap 11): Flex accepts it,
+`regex-syntax` does not, and a hand-written engine will disagree with both.
+
+### D3 — serialization: version byte + one byte per state — *decided*
 
 ```
 byte 0        format version (1)
-bytes 1..n    the state stack, bottom first, top last (≤ 64 entries)
+bytes 1..n    the state stack, bottom first, top last
 ```
 
-Canonical by construction (no padding, no pointers). Depth cap 64, well inside
-the 1024-byte buffer; a push beyond it does **not** silently drop — the scan
-fails, which becomes an ordinary `ERROR`/`MISSING`, and the cap is documented
-and tested at the boundary. (Flex has no cap; the deepest start-condition
-nesting in bison.g — the case that motivated the item — is two.)
+Canonical by construction (no padding, no pointers). Capacity is
+`TREE_SITTER_SERIALIZATION_BUFFER_SIZE - 1` = 1023 frames, and the state count is
+capped at 255 because a frame is a byte. Both are checked at compile time, so the
+only runtime failure is a push past 1023 nested states on real input — reported
+as `ERROR`/`MISSING`, documented, and tested at the boundary. (v1's cap of 64 was
+invented; bison.g nests two deep, an indent stack nests once per level, and there
+is no reason to fail at 65.)
 
-### D4 — `reject` — *proposed: next-best candidate at the same position*
+### D4 — `reject`: next-best candidate at the same position — *decided*
 
-The matcher already produces the candidate list to implement longest-match, so
-`reject` is "mark the current candidate as refused and continue", i.e. the
-second-longest pattern, then the third. It is not Flex's exact re-run of the
-action (there are no actions), but it is the same language for the shapes that
-matter (`%word` fallback, `unreserved_keyword` vs keyword).
+Same candidate list as longest-match, so this is a loop, not a re-run of a
+user action (there are no user actions). It is the same language for the shapes
+that matter (`%word` fallback, `unreserved_keyword` vs keyword).
 
 ### D5 — where the code lives — *decided*
 
-`src/lexer_dsl.rs` (parse + IR), `src/lexer_codegen.rs` (NFA/DFA + C),
+`src/lexer_dsl.rs` (parse + IR), `src/lexer_codegen.rs` (NFA/DFA + C tables),
 `src/scanner.rs` (the C skeleton: create/destroy/serialize/deserialize/scan, the
-whitespace loop, `rest`), `src/parser.rs` (the directive → `GrammarAst.lexer`),
-`src/compile.rs` (externals list → `grammar.json`), `src/emit.rs` (write
-`scanner.c`, and the roundtrip note). Same shape as `delimited(…)` today, so
-`--from-json` keeps its existing limitation: a scanner cannot come back from
-`grammar.json`, and that note already exists in `SYNTAX.md:480`.
+trivia loop, `rest`), `src/parser.rs` (the directive → `GrammarAst.lexer`),
+`src/compile.rs` (stateless lowering to token rules, stateful lowering to
+`externals` + `extras`), `src/emit.rs` (write `scanner.c`; print the block back),
+`src/lexing.rs` (validation shared with the `tokens` block: `is_token`, zero-width,
+`%word`/`%reserved`) — the same shape as `delimited(…)` today.
 
-### D6 — `delimited(…)` stays — *decided*
+### D6 — `delimited(…)` stays, and gains the extras fix — *decided*
 
-It is not sugar over `%lexer` in the first cut: it is the stateless special case,
-already tested and already doing a job (`bison/check.sh` depends on it). The
-general path must not regress it. A later cleanup can lower it onto the same
-emitter once `%lexer` has a fixture that proves equivalence.
+It is the stateless special case, already tested, and `bison/check.sh` depends on
+it. **Step 0b applies §1.5 to it**: a non-whitespace extra becomes an external
+extra token that the generated scanner returns, which is what makes `{` after
+`/* … */` work. That is a smaller change than `%lexer` and it removes a
+documented limitation, so it goes first. A later cleanup lowers `delimited` onto
+the `%lexer` emitter once a fixture proves equivalence.
 
 ### D7 — what is refused, by name — *decided*
 
-`yymore`, `yytext`/`yyleng` in a pattern or action, action code (C) inside a
-block, non-greedy patterns, lookbehind, and Flex trailing context `r/s`. Each is
+`yymore`, `yytext`/`yyleng` in a pattern or action, C in an action, non-greedy
+patterns, lookbehind, `%option`-style global flags, and `@immediate`. Each is
 rejected at its own position with a sentence saying what to write instead, and
-counted in the translator's report (the `REPORT`-style ledger the parser already
-uses), so a `.g` that loses its lexer loses it loudly.
+counted in the translator's report (`REPORT`-style ledger), so a `.g` that loses
+its lexer loses it loudly.
+
+Trailing context is **not** on this list (v1 refused it). It is `when(…)`, step 4,
+because it is the author-facing form of lexical lookahead and the same candidate
+loop as `reject`: match the main pattern, then run the right context from the end
+without `mark_end`, and fall through to the next candidate on failure. A scanner
+can do variable-length right context, which Flex cannot.
 
 ---
 
@@ -297,15 +416,18 @@ With `%lexer` the mapping is one table, and the notes become zero:
 |---|---|---|
 | `%s`/`%x` state lists | only the balanced-region idiom | `INITIAL` + named state groups |
 | `<A,B>pattern` | leading states stripped | pattern belongs to those groups |
-| `pattern<<>  TOKEN` | balanced-region idiom only | `-> push(TOKEN)` |
+| `pattern<<>  TOKEN` | balanced-region idiom only | `-> push(STATE)` + `return TOKEN` on the matching rule |
 | `pattern<>TOKEN` | same | `-> pop(TOKEN)` |
 | `pattern<>STATE>` (no token) | same | `-> enter(STATE)` |
-| `BEGIN(X)` | dropped, noted | `-> enter(X)` |
-| `reject()` | dropped (approximated by `%fallback` today) | `-> reject` |
+| `BEGIN(X)` after returning a token | dropped, noted | `-> return TOKEN` in a rule of the *other* state, or `enter` |
+| empty action / `skip()` | became a `%extra` (HANDOFF item 9) | `-> skip;`, or an external extra token when the pattern is comment-like |
+| `reject()` | dropped (approximated by `%fallback`) | `-> reject` |
 | `yyless(n)` | dropped | `-> yyless(n)` |
-| `<<EOF>>` | dropped | `-> return TOKEN;` with `eof` |
+| `<<EOF>>` | dropped | `pattern eof -> return TOKEN;` |
+| `r/s` trailing context | dropped | `r when(s) -> action` |
 | `(?s:.)` catch-all in a region state | part of the idiom | a pattern like any other |
-| `yymore()` / trailing context / action code | dropped | refused with a position + a `REPORT` line |
+| `%option caseless` | `/…/i` on keywords | unchanged: the `i` flag, no new modifier |
+| `yymore()` / action code | dropped | refused with a position + a `REPORT` line |
 
 Acceptance (from the ROADMAP, restated so it is checkable): bison.g's three
 start conditions become one block with no hand-written C, `EPILOGUE` is
@@ -316,13 +438,31 @@ expressible, and `carbon-lang.y` + `actions.y` still parse with 0 `ERROR`.
 ## 6. Honest ledger (the part that must not rot)
 
 Every construct that cannot become a `%lexer` block is reported by *reason*, not
-by a generic "unsupported": `lexer-action-code`, `lexer-yymore`,
-`lexer-trailing-context`, `lexer-pattern-empty` (a pattern that can match
-nothing), `lexer-unreachable-state` (a state nothing enters), `lexer-unreached-token`
-(a token no parse state accepts — the analogue of the dead-token note),
-`lexer-overlaps-internal`, `extras-in-lexer`, `lexer-depth` (a push bound the
-grammar cannot respect). Same discipline as the nullable rewrite: a loss is a
-decision, a decision is printed.
+by a generic "unsupported":
+
+| code | when |
+|---|---|
+| `lexer-action-code` | C in an action |
+| `lexer-yymore` | `yymore()` |
+| `lexer-pattern-empty` | a pattern that can match nothing |
+| `lexer-zero-width` | zero-width and no state change (the hang) |
+| `lexer-unreachable-state` | a state nothing enters |
+| `lexer-unreached-token` | a token no parse state accepts (the dead-token note) |
+| `lexer-unused-token` | a block token nothing produces |
+| `lexer-pattern-shadowed` | a pattern that can never win in its state — the analogue of the dead-token note, new in v2 |
+| `lexer-token-outside-block` | a grammar token that a stateful block did not declare — new in v2 |
+| `lexer-extra-unrepresentable` | an extra that cannot become an external extra token |
+| `lexer-depth` | more than 255 states, or a push bound the grammar cannot respect |
+| `lexer-immediate` | `@immediate` inside a block |
+
+`extras-in-lexer` and `lexer-overlaps-internal` are **removed** (v1 had both): the
+first because extras are now compiled in (§1.5, D1), the second because there is
+no mixed mode to overlap with. If `%lexer hybrid` is ever added, the second comes
+back with it.
+
+Same discipline as the nullable rewrite: a loss is a decision, a decision is
+printed. `--explain-lexing` renders the same table for a block (states, patterns
+in priority order, the externals they declare, the trivia they inject).
 
 ---
 
@@ -341,96 +481,118 @@ Gate: `bison/check.sh` grows an `EPILOGUE` count (≥1) and the translator emits
 `rest_of_file()` for `EPILOGUE_ST` instead of noting it as "not a balanced
 region"; `tsg` suite 112 still green.
 
-Why first: it is the acceptance test's hardest half, it needs no new machinery,
-and it proves the pattern-extraction path end to end.
+### Step 0b — the extras fix, and the runtime bug characterised (~½ day)
 
-### Step 1 — the block's syntax and IR, no code generation (~½ day)
+Apply §1.5 to `delimited(…)`: every non-whitespace `%extra` becomes an external
+extra token that the generated scanner returns before its region; whitespace is
+skipped inside the scanner; an extra that cannot be expressed that way is
+reported (`lexer-extra-unrepresentable`). Then re-run §1.5's table as fixtures.
 
-`%lexer { … }` parses into `LexerAst`, is validated (unknown action, empty
-pattern, dead state, unreachable token), and `--explain-lexing` prints the states,
-their patterns in priority order, and the externals they would declare. Emitting
-it is still an error ("`%lexer` is not compiled yet" at the block, not a crash).
+Gate: `{ a } /*x*/ { b }` and `/*x*/ { a }` parse with **no `ERROR`, no truncation,
+and a `comment` node**; the `{ a } /*x*/ $$$` probe no longer exits 0 (it is an
+error, or — if the runtime bug persists for internal tokens — the probe is
+recorded in `HANDOFF.md` as an upstream bug with the exact inputs); `bison/check.sh`
+green.
 
-Gate: unit tests only; `--explain-lexing` on the bison example in §2 prints what
-§2 says; nothing else changes.
+Why before the block: it is the smallest possible change that removes a
+documented limitation, it is the mechanism the block will use, and it turns
+"extras are the author's problem" into "extras are `tsg`'s problem" before any
+author writes a block.
 
-### Step 2 — the regex engine (~2 days)
+### Step 1 — the block's syntax and IR, no code generation (~1 day)
 
-The NFA/DFA and the C tables, tested **three** ways: a reference simulator in
-Rust (test-only), the same pattern set compiled as an ordinary `tokens { … }`
-block and compared against tree-sitter's own lexer on a corpus, and the fixture
-grammars below.
+`%lexer { … }` parses into `LexerAst`, is validated (§6), and prints back: `--fmt`
+must re-print a block (idempotent, same grammar by `--diff`), `--annotate` must
+annotate it, `--explain-lexing` must show its states and injected trivia.
+Emitting it is still an error ("`%lexer` is not compiled yet" at the block, not a
+crash).
 
-Gate: a `%lexer` block with one state, no push/pop, whose patterns are exactly
-the tokens of a `tokens`-block twin, produces byte-identical token streams on
-every fixture in `bison/`, `bc/` and the `.probe` corpus.
+Gate: unit tests only, plus "`--fmt` of a block is a fixpoint and `--diff` says
+same grammar" and "`--explain-lexing` on §2's example prints what §2 says";
+nothing else changes.
 
-### Step 3 — states, `enter`, and serialization (~1 day)
+### Step 2 — the regex engine, stateless blocks only (~2 days)
 
-`push`/`pop`/`enter`, the payload format of D3, the depth cap, and an incremental
-reparse test (edit one character inside a region; the tree must still be right —
-this is what the payload hashing makes possible to get wrong).
+The NFA/DFA and the C tables, exercised through the *stateless* lowering: a block
+with no state action becomes a `tokens` block. No `scanner.c`, no externals, no
+runtime change.
 
-Gate: a fixture with three nested regions, parsed, then reparsed after an edit
-inside one — the tree and the state payload must both come out right.
+Gate: `generate --stamp` of the block spelling and of the `tokens`-block twin are
+**identical** for every fixture, plus the exhaustive-alphabet pattern corpus of
+D2. This step buys no new capability and that is deliberate: it buys an exact
+oracle for the riskiest code in the item. If it is late, stop here — everything
+after depends on it.
 
-### Step 4 — `reject` and the candidate list (~½ day)
+### Step 3 — states, the payload, and the first real capability (~1–2 days)
+
+`enter`/`push`/`pop`, D3's payload, the 255/1023 bounds, and the stateful
+lowering of D1 (all tokens external, trivia injected, `lexer-token-outside-block`
+enforced).
+
+Gate: a grammar with two `BEGIN`-style states — the shape 52/358 corpus files
+use — translates and parses; a fixture with three nested regions parses, then
+reparses correctly after an edit inside one (the payload is hashed, so this is
+where it breaks if it is going to); `--report-lex-states` on the generated parser
+shows the externals in the right modes.
+
+### Step 4 — `reject`, `yyless`, and `when(…)` (~1 day)
+
+All three use the candidate list from step 2.
 
 Gate: a fixture whose two patterns tie on length and whose order decides the
-token; `--explain-lexing` shows the candidate order that `reject` walks.
+token; a fixture where `reject` flips it; a `when(…)` fixture reproducing a
+`_LA`-style split (`WITH` vs `WITH TIME`) with both parses asserted.
 
 ### Step 5 — the translator (~1–2 days)
 
-`cst.rs` reads the general Flex shapes and emits a block; `pushdown_of`'s
-idiom-detection stays as the fast path for the balanced case (D6) but is no
-longer the only thing that survives. `BEGIN`, `<<>`, `<>`, `reject()`, `yyless`,
-`<<EOF>>` map per §5.
+`cst.rs` reads the general Flex shapes and emits blocks; `pushdown_of`'s idiom
+detection stays as the fast path (D6) but is no longer the only survivor.
 
-Gate: `bison/check.sh` green with `%lexer` instead of `%external … delimited`;
-the count of "switch to a start condition was dropped" notes is **0**; the sweep
-(`python3 .check/sweep3.py`) still translates 320/358 with no new failures, and
-the `.tsg` files that used to lose start conditions now carry a block.
+Gate: `bison/check.sh` green with `%lexer` instead of `%external … delimited`; the
+count of "switch to a start condition was dropped" notes is **0**; the 358-file
+sweep still translates 320/358 with no new failures; every `.tsg` that used to
+lose start conditions now carries a block.
 
-### Step 6 — docs, and the roundtrip note (~½ day)
+### Step 6 — docs (~½ day)
 
-`SYNTAX.md` §"A lexer section" (the surface of §2, exactly as implemented),
-`DECLARATIVE.md` §7.3 second half ("the per-parse-state lexer states are a
-report, a block is the fix"), `README.md` feature table, `AUTHORING.md` §3 no
-longer listing start conditions as unworkaroundable, and the `--from-json` note
-in `SYNTAX.md` extended from "a scanner cannot round-trip" to "a `%lexer` block
-cannot round-trip".
+`SYNTAX.md` §"A lexer section" (the surface of §2 as implemented),
+`DECLARATIVE.md` §7.3 second half, `README.md` feature table, `AUTHORING.md` §3
+(start conditions no longer unworkaroundable), and the `--from-json` note
+extended to "a `%lexer` block cannot round-trip".
 
 ---
 
 ## 8. Fixtures and gates
 
-New fixture grammars, under `tmp/tsg/lexer/` (beside the translator's, not in
-the tree-sitter workspace — they are `tsg` fixtures, not generator tests):
+New fixture grammars under `tmp/tsg/lexer/` (beside the translator's, not in the
+tree-sitter workspace — they are `tsg` fixtures, not generator tests):
 
 | fixture | proves |
 |---|---|
 | `lexer/rest_of_file.tsg` | step 0, no states |
-| `lexer/one_state.tsg` | step 2, matches its `tokens`-block twin |
-| `lexer/nested.tsg` | step 3, `{ { } }` and depth in the payload |
+| `lexer/extras.tsg` | step 0b: comment before/between/after a region, node present |
+| `lexer/one_state.tsg` | step 2, stamp-identical to its `tokens`-block twin |
+| `lexer/nested.tsg` | step 3, `{ { } }`, depth in the payload, reparse after an edit |
 | `lexer/reject.tsg` | step 4, tie broken by order, then by `reject` |
+| `lexer/lookahead.tsg` | step 4, `when(…)` reproduces a `_LA` split |
 | `lexer/epilogue.tsg` | the bison shape, end to end |
 
-Existing gates that must stay green at every step: `tsg` suite (112), translator
-suite (40), `bison/check.sh`, `bin/g2tsg` sweep (320/358, no new failures),
-`selfhost.sh`, `e2e.sh`.
+Existing gates that must stay green at every step: `tsg` suite (**112**),
+translator suite (**40**), `bison/check.sh`, `bin/g2tsg` sweep (320/358, no new
+failures), `selfhost.sh`, `e2e.sh`, `roundtrip.sh`.
 
 ---
 
 ## 9. Non-goals
 
-- **ABI 16.** Not needed for any of this; `ROADMAP.md:189` keeps it as an
-  optional performance follow-up with a benchmark as the trigger.
+- **ABI 16.** Not needed for any of this; `ROADMAP.md` keeps it as an optional
+  performance follow-up with a benchmark as the trigger.
 - **C in actions.** The whole point is that the author writes what the language
   is (§2).
 - **JS DSL parity, stock-tree-sitter compatibility.** Dropped by the ROADMAP.
-- **A lexer that understands strings and comments inside a region.** Same
-  documented limitation as `delimited`; the escape hatch is a hand-written
-  scanner, and `tsg` says so.
+- **A lexer that understands a region's contents for free.** A block *can* — that
+  is what the `STRING` state in §2 is — but the author has to say so. The
+  zero-effort escape hatch stays a hand-written scanner, and `tsg` says so.
 - **`yymore`.** Nothing in the corpus needs it; refusing it costs nothing.
 
 ---
@@ -452,39 +614,46 @@ G2TSG_REPORT=1 ./bin/g2tsg bison/bison.g --name bison -o /dev/null 2>&1 >/dev/nu
 target/debug/tsg --explain-lexing examples/tsg.tsg
 
 # builds (see HANDOFF.md for the full recipe)
-CARGO_HOME=$PWD/.ch CARGO_TARGET_DIR=$PWD/target cargo build --offline   # tsg
+cargo build --offline   # tsg, 0.7 s
 ```
 
 Read, in this order: `SYNTAX.md` §"External scanners" (the contract that exists),
-`src/scanner.rs` (230 lines, all of the current mechanism), this file,
-`ROADMAP.md:64`, `HANDOFF.md` §"Lexer" notes.
+`src/scanner.rs` (231 lines, all of the current mechanism), this file,
+`ROADMAP.md` §2, `HANDOFF.md` §"Lexer" notes.
 
-Numbers to compare against, so a regression is visible immediately: `tsg` 112
-tests, translator 40 tests, `bison/check.sh` → 263 rules / 3338 + 78 nodes /
+Numbers to compare against, so a regression is visible immediately: `tsg` **112**
+tests, translator **40** tests, `bison/check.sh` → 263 rules / 3338 + 78 nodes /
 `carbon-lang.y` 827 tokens / `actions.y` 26 tokens / 6 `ACTION_CODE` / 0 `ERROR`,
 sweep 320/358.
 
 When a doc disagrees with the code, the code wins and the doc gets fixed in the
-same commit. Two entries were corrected while writing this file: `HANDOFF.md`
-no longer claims `%fallback` is unimplemented, and `ROADMAP.md` item 2 now points
-here. `ROADMAP.md` item 3's numbers still predate the translator rewrite.
+same commit.
 
 ---
 
 ## 11. Size
 
-Step 0 is an hour, steps 1–4 are the week the ROADMAP estimated, step 5 is the
-part that touches the corpus, step 6 is docs. The engine in step 2 is the only
-piece that could double: a regex parser plus subset construction in a
-dependency-free crate is real work, and it is the piece to time-box and review
-before step 3 starts.
+Step 0 is an hour, step 0b is half a day, step 1 a day, steps 2–4 are the week the
+ROADMAP estimated, step 5 is the part that touches the corpus, step 6 is docs.
+The engine in step 2 is the only piece that could double: a regex parser plus
+subset construction in a dependency-free crate is real work. It is time-boxed by
+its oracle (`--stamp` identity), so a session that runs out of time on it still
+leaves every other gate green.
+
+---
 
 ## 12. Open questions for the author of the language (you)
 
-1. **D1** — mixed mode (recommended) or every token external?
-2. **D3** — is a 64-deep state stack acceptable, or should `tsg` count nesting
-   depth statically and refuse a grammar it cannot guarantee?
-3. **Surface** — is `push`/`pop`/`enter` the vocabulary you want, or
-   `<<>`/`<>` spelled the Flex way so a `.g` translates by eye?
-4. **Step 0** — worth landing on its own (it makes bison's `EPILOGUE`
-   expressible today), or fold it into step 2?
+1. **D1's boundary** — is "stateless block = `tokens` block, stateful block = the
+   whole lexer" the right rule, or should a stateful block be allowed to keep
+   some tokens internal (`%lexer hybrid;`, with the priority surprise reported)?
+   The recommendation is the strict rule, because §1.5 shows the boundary is not
+   just a priority question.
+2. **Surface** — `push`/`pop`/`enter`/`skip`/`reject`/`rest`/`yyless` as written
+   (`yyless` keeps Flex's name deliberately: it appears verbatim in the `.g` the
+   translator reads, and renaming it would create a second spelling), and
+   `when(pattern)` for trailing context. Any rename has to happen before step 1,
+   because `--fmt` pins the surface.
+
+Answered since v1: D3's depth (buffer-bound, 1023/255) and the pattern language
+(the `tokens` block's, verbatim).
