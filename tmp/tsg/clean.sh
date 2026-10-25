@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# Free the ramdisk before a build, without deleting anything that is not
+# regenerable.  Everything this removes is either a check-script scratch
+# directory, a build tree, or output that `tsg`/`tree-sitter` writes next to a
+# grammar (all of it is in .gitignore).
+#
+#   ./clean.sh                # scratch + generated parsers; keeps target/ bin/
+#   ./clean.sh --target       # also target/ (74 M; `tsg` must be rebuilt)
+#   ./clean.sh --binaries     # also bin/ (patched tree-sitter, g2tsg)
+#   ./clean.sh --all          # both
+#   ./clean.sh --dry-run ...  # print what would go, remove nothing
+#
+# Never touches anything outside this directory.  The two things worth
+# protecting by hand are bin/tree-sitter (a release build of this checkout with
+# patches 0001-0010) and bin/g2tsg; --binaries prints the recipes to rebuild
+# them, see HANDOFF.md §"Toolchain provenance".
+set -euo pipefail
+
+root=$(cd "$(dirname "$0")" && pwd)
+dry=0
+want_target=0
+want_binaries=0
+for arg in "$@"; do
+    case $arg in
+        --dry-run|-n) dry=1 ;;
+        --target) want_target=1 ;;
+        --binaries) want_binaries=1 ;;
+        --all) want_target=1; want_binaries=1 ;;
+        -h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) echo "clean.sh: unknown argument '$arg' (try --help)" >&2; exit 2 ;;
+    esac
+done
+
+before=$(df -k /Volumes/RamDisk 2>/dev/null | awk 'NR==2 {print $4}')
+freed=0
+
+# `prune PATH`: remove PATH if it is inside $root.  Prints one line per item,
+# with its size, so the log says what the space was.
+prune() {
+    local path=$1 size
+    case $(cd "$(dirname "$path")" 2>/dev/null && pwd -P) in
+        "$root"|"$root"/*) ;;
+        *) echo "clean.sh: refusing '$path' (outside $root)" >&2; return 0 ;;
+    esac
+    [ -e "$path" ] || return 0
+    size=$(du -sk "$path" 2>/dev/null | awk '{print $1}')
+    size=${size:-0}
+    if [ "$dry" = 1 ]; then
+        printf '  would remove %6s M  %s\n' "$((size / 1024))" "${path#"$root"/}"
+    else
+        rm -rf "$path"
+        printf '  removed       %6s M  %s\n' "$((size / 1024))" "${path#"$root"/}"
+    fi
+    freed=$((freed + size))
+}
+
+echo "clean.sh: $root"
+
+# 1. Scratch from the check scripts.  A parse log or a copied corpus is worth
+#    nothing after the run that wrote it.
+for d in .self .roundtrip .diff .e2e .harness .xmode .probe .bc .ref \
+         .g2tsg bison_flex/.corpus; do
+    prune "$root/$d"
+done
+# Any `.check` (gates build their parsers there) and any leftover `.old*`.
+while IFS= read -r d; do prune "$d"; done < <(find "$root" -maxdepth 2 -name '.check*' -o -maxdepth 2 -name '.old*' 2>/dev/null | sort)
+# `__pycache__` from the python helpers.
+while IFS= read -r d; do prune "$d"; done < <(find "$root" -maxdepth 3 -name __pycache__ 2>/dev/null | sort)
+
+# 2. Parsers and linkable libraries written by `tsg` / `tree-sitter build`.
+#    The `.tsg` and `.g` sources stay; these are output (see .gitignore).
+while IFS= read -r f; do prune "$f"; done < <(find "$root" \( \
+        -name parser.c -o -name grammar.json -o -name node-types.json \
+     \) -path '*/src/*' 2>/dev/null | sort)
+while IFS= read -r d; do prune "$d"; done < <(find "$root" -path '*/src/tree_sitter' -type d 2>/dev/null | sort)
+while IFS= read -r d; do prune "$d"; done < <(find "$root" -maxdepth 3 -name lib -type d 2>/dev/null | sort)
+while IFS= read -r f; do prune "$f"; done < <(find "$root" -maxdepth 3 -name '*.dylib' -o -maxdepth 3 -name '*.so' 2>/dev/null | sort)
+
+# 3. Build trees, on request.  `target/` holds the `tsg` binary the gates and
+#    the translators call, so it is worth keeping between runs.
+[ "$want_target" = 1 ] && prune "$root/target"
+if [ "$want_binaries" = 1 ]; then
+    prune "$root/bin"
+    cat <<'EOF'
+  rebuild before the next gate run:
+    CARGO_TARGET_DIR=tmp/tsg/.tsbuild CARGO_INCREMENTAL=0 \
+    CARGO_PROFILE_RELEASE_STRIP=true cargo build --release --offline -p tree-sitter-cli
+    cp tmp/tsg/.tsbuild/release/tree-sitter tmp/tsg/bin/tree-sitter && rm -rf tmp/tsg/.tsbuild
+    (cd tmp/tsg/bison_flex && ../bin/tree-sitter generate src/grammar.json)
+    (cd tmp/tsg/bison_flex/translate && CARGO_TARGET_DIR=../../.g2tsg \
+       CARGO_INCREMENTAL=0 cargo build --release --offline) &&
+       cp tmp/tsg/.g2tsg/release/g2tsg tmp/tsg/bin/g2tsg && rm -rf tmp/tsg/.g2tsg
+    (cd tmp/tsg && cargo build -p tsg)     # target/debug/tsg
+EOF
+fi
+
+after=$(df -k /Volumes/RamDisk 2>/dev/null | awk 'NR==2 {print $4}')
+printf '\n%s %s M, %s M free%s\n' \
+    "$([ "$dry" = 1 ] && echo would free || echo freed)" "$((freed / 1024))" \
+    "$((after / 1024))" \
+    "$([ -n "${before:-}" ] && [ -n "${after:-}" ] && echo " (was $((before / 1024)) M)")"
+[ "$dry" = 1 ] || echo "gates: ./selfhost.sh ./diff.sh ./e2e.sh ./roundtrip.sh --parsers"
