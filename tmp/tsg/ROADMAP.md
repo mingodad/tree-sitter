@@ -63,6 +63,9 @@ order the fallback targets before the fallback token and emit nothing new.
 
 ### 2. A real lexer section, compiled to `scanner.c`  (~1 week)
 
+**Design and step plan: `LEXER.md`.** That file is the one to start from; the
+sketch below is the summary it expands.
+
 The Flex half of the corpus, and the one feature that changes what an author can
 write.  `%external body = delimited('{', '}')` is the first proof of the
 mechanism; the general form is a `%lexer { … }` block with named start

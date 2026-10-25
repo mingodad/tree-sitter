@@ -205,7 +205,8 @@ evidence).
 4. **No lexer lookahead.** `WITH_LA`/`NULLS_LA`/`NOT_LA` collapse onto their
    base token, which is what creates the one genuine ambiguity,
    `utility_option_name` vs `unreserved_keyword` on `FORMAT`.
-5. **`%fallback` is not implemented** (1970 occurrences in the 358-file corpus),
+5. ~~**`%fallback` is not implemented**~~ Done (`8f51b4d`; 1970 occurrences in
+   the 358-file corpus),
    and the 12 `%conflicts` this grammar needs are all translation artifacts.
 6. The translator had to write three token bodies by hand (`Op`, `SCONST`,
    `IDENT`) because the Flex rules were approximated in `postgres16.g` itself.
