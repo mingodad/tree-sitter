@@ -22,6 +22,7 @@
 //!
 //! See `examples/` and `SYNTAX.md` for the language reference.
 
+pub mod annotate;
 pub mod compile;
 pub mod diff;
 pub mod emit;
@@ -29,6 +30,7 @@ pub mod json;
 pub mod json_read;
 pub mod lexer;
 pub mod lexing;
+pub mod literal;
 pub mod nullable;
 pub mod parser;
 pub mod precedence;

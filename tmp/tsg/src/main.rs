@@ -18,7 +18,9 @@ use std::{
     process::ExitCode,
 };
 
-use tsg::{compile, diff, emit, json, json_read, lexer, lexing, precedence, scanner, to_tsg};
+use tsg::{
+    annotate, compile, diff, emit, json, json_read, lexer, lexing, precedence, scanner, to_tsg,
+};
 
 struct Options {
     input: Option<String>,
@@ -38,6 +40,9 @@ struct Options {
     diff: Option<String>,
     /// `--fmt`: re-print the grammar from its AST instead of compiling it.
     format: bool,
+    /// `--annotate`: like `--fmt`, plus comments about what the front end knows
+    /// (token priority, dead tokens, precedence levels, emptiness).
+    annotate: bool,
     /// `--check`: like `--fmt`, but write nothing and fail if the file is not
     /// already canonical.
     check: bool,
@@ -52,6 +57,7 @@ fn usage() -> String {
         "    tsg --from-json [INPUT.json] [-o OUTPUT.tsg]",
         "    tsg --diff OTHER [INPUT.tsg]",
         "    tsg --fmt [INPUT.tsg] [-o OUTPUT.tsg]",
+        "    tsg --annotate [INPUT.tsg] [-o OUTPUT.tsg]",
         "",
         "    INPUT   read from this file, or stdin if omitted or `-`",
         "    -o      write to this file instead of stdout",
@@ -61,6 +67,9 @@ fn usage() -> String {
         "        --diff OTHER           compare INPUT and OTHER as grammars, not as text",
         "                               (exit 1 and report the first differences)",
         "    -f, --fmt                  re-print the grammar in canonical form",
+        "    -a, --annotate             re-print it with what tsg knows as comments:",
+        "                               token priority, tokens nothing produces, which",
+        "                               alternatives a precedence level marks, emptiness",
         "        --check                fail if the grammar is not already canonical",
         "    -p, --precedences          print the resolved precedence table",
         "        --explain-lexing       print token priority and derived lexer inputs",
@@ -87,6 +96,7 @@ fn parse_args() -> Result<Options, String> {
         show_lexing: false,
         diff: None,
         format: false,
+        annotate: false,
         check: false,
     };
     while let Some(arg) = args.next() {
@@ -104,6 +114,7 @@ fn parse_args() -> Result<Options, String> {
             "--explain-lexing" | "--explain-modes" => options.show_lexing = true,
             "--allow-ignored-flags" => options.allow_ignored_flags = true,
             "-f" | "--fmt" => options.format = true,
+            "-a" | "--annotate" => options.annotate = true,
             "--check" => options.check = true,
             "--diff" => match args.next() {
                 Some(path) => options.diff = Some(path),
@@ -158,6 +169,10 @@ fn main() -> ExitCode {
 
     if let Some(other) = &options.diff {
         return compare_grammars(&options, &source, &display_name, other);
+    }
+
+    if options.annotate {
+        return annotate_grammar(&options, &source, &display_name);
     }
 
     if options.format || options.check {
@@ -311,6 +326,32 @@ fn write_scanner(options: &Options, source: &str) -> Result<(), String> {
     }
     std::fs::write(&path, source)
         .map_err(|err| format!("cannot write `{}`: {err}", path.display()))
+}
+
+fn annotate_grammar(options: &Options, source: &str, display_name: &str) -> ExitCode {
+    let output = match annotate::annotate(source) {
+        Ok(output) => output,
+        Err(err) => {
+            eprint!("{}", lexer::render_error(source, display_name, &err));
+            return ExitCode::FAILURE;
+        }
+    };
+    match &options.output {
+        Some(path) => {
+            if let Err(err) = std::fs::write(path, &output.text) {
+                eprintln!("error: cannot write `{path}`: {err}");
+                return ExitCode::FAILURE;
+            }
+        }
+        None => {
+            let mut stdout = std::io::stdout().lock();
+            if let Err(err) = stdout.write_all(output.text.as_bytes()) {
+                eprintln!("error: cannot write to stdout: {err}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    ExitCode::SUCCESS
 }
 
 fn format_grammar(options: &Options, source: &str, display_name: &str) -> ExitCode {

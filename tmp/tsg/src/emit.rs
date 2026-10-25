@@ -18,6 +18,7 @@
 
 use crate::{
     lexer::Error,
+    literal::{quote, regex_literal},
     parser::{Assoc, Expr, ExprKind, GrammarAst, Parser, PrecedenceGroup},
 };
 
@@ -28,21 +29,61 @@ pub struct Output {
     pub interior_comments: usize,
 }
 
+/// Comment lines `--annotate` attaches, keyed by the thing they sit above: a
+/// rule name, or a section name (`"extras"`, `"externals"`, `"tokens"`,
+/// `"precedences"`).
+///
+/// They are written as ordinary `//` comments, indented to match whatever they
+/// sit inside, so the annotated file is still a `.tsg` file that compiles to the
+/// same `grammar.json` — which is the whole point, and what `--diff` checks.
+#[derive(Debug, Default)]
+pub struct Notes {
+    rules: std::collections::BTreeMap<String, Vec<String>>,
+    sections: std::collections::BTreeMap<String, Vec<String>>,
+}
+
+impl Notes {
+    pub fn rule(&mut self, name: &str, lines: &[String]) {
+        self.rules.entry(name.to_owned()).or_default().extend_from_slice(lines);
+    }
+
+    pub fn section(&mut self, name: &str, lines: &[String]) {
+        self.sections.entry(name.to_owned()).or_default().extend_from_slice(lines);
+    }
+
+    fn for_rule(&self, name: &str) -> &[String] {
+        self.rules.get(name).map_or(&[], Vec::as_slice)
+    }
+
+    fn for_section(&self, name: &str) -> &[String] {
+        self.sections.get(name).map_or(&[], Vec::as_slice)
+    }
+}
+
 /// Re-print `source` in canonical form.
 pub fn fmt(source: &str) -> Result<Output, Error> {
     let ast = Parser::new(source)?.parse()?;
+    Ok(printed(source, &ast, None))
+}
+
+/// Re-print `source` with `notes` above the rules and sections they belong to.
+pub fn annotate(source: &str, ast: &GrammarAst, notes: &Notes) -> Output {
+    printed(source, ast, Some(notes))
+}
+
+fn printed(source: &str, ast: &GrammarAst, notes: Option<&Notes>) -> Output {
     let (header, interior_comments) = comments(source);
     let mut out = String::new();
     if !header.is_empty() {
         out.push_str(&header);
         out.push('\n');
     }
-    let body = body(&ast);
+    let body = body(ast, notes);
     out.push_str(&body);
-    Ok(Output {
+    Output {
         text: out,
         interior_comments,
-    })
+    }
 }
 
 /// The leading comment block, verbatim, and the number of comment lines after it.
@@ -68,7 +109,7 @@ fn comments(source: &str) -> (String, usize) {
     (header, interior)
 }
 
-fn body(ast: &GrammarAst) -> String {
+fn body(ast: &GrammarAst, notes: Option<&Notes>) -> String {
     let mut sections: Vec<String> = Vec::new();
     let mut directives: Vec<String> = Vec::new();
 
@@ -100,7 +141,7 @@ fn body(ast: &GrammarAst) -> String {
         extras.push(format!("%extra {};", expr(extra, 0)));
     }
     if !extras.is_empty() {
-        sections.push(extras.join("\n"));
+        push_section(&mut sections, notes, "extras", extras.join("\n"));
     }
 
     let mut optionals: Vec<String> = Vec::new();
@@ -118,14 +159,14 @@ fn body(ast: &GrammarAst) -> String {
             Some(scanner) => optionals.push(format!(
                 "%external {} = delimited({}, {});",
                 expr(external, 0),
-                string(&scanner.open.to_string()),
-                string(&scanner.close.to_string())
+                quote(&scanner.open.to_string()),
+                quote(&scanner.close.to_string())
             )),
             None => optionals.push(format!("%external {};", expr(external, 0))),
         }
     }
     if !optionals.is_empty() {
-        sections.push(optionals.join("\n"));
+        push_section(&mut sections, notes, "externals", optionals.join("\n"));
     }
     if !ast.inline.is_empty() {
         let names: Vec<&str> = ast.inline.iter().map(|(name, _)| name.as_str()).collect();
@@ -149,7 +190,7 @@ fn body(ast: &GrammarAst) -> String {
     }
     if !ast.precedences.is_empty() {
         let lines: Vec<String> = ast.precedences.iter().map(precedence).collect();
-        sections.push(lines.join("\n"));
+        push_section(&mut sections, notes, "precedences", lines.join("\n"));
     }
     if !ast.reserved.is_empty() {
         let lines: Vec<String> = ast
@@ -178,10 +219,11 @@ fn body(ast: &GrammarAst) -> String {
                 continue;
             }
             emitted_tokens = true;
-            sections.push(tokens_block(ast, &token_names));
+            let block = tokens_block(ast, &token_names, notes);
+            push_section(&mut sections, notes, "tokens", block);
             continue;
         }
-        sections.push(rule_text(name, rule));
+        push_rule(&mut sections, notes, name, rule_text(name, rule));
     }
 
     let mut out = String::new();
@@ -196,12 +238,13 @@ fn body(ast: &GrammarAst) -> String {
 }
 
 /// The `tokens { … }` block, in file order.
-fn tokens_block(ast: &GrammarAst, token_names: &[&str]) -> String {
+fn tokens_block(ast: &GrammarAst, token_names: &[&str], notes: Option<&Notes>) -> String {
     let mut block = String::from("tokens {\n");
     for (name, rule) in &ast.rules {
         if !token_names.contains(&name.as_str()) {
             continue;
         }
+        comment(&mut block, notes.map(|notes| notes.for_rule(name)), "    ");
         let immediate = ast
             .tokens
             .iter()
@@ -214,6 +257,33 @@ fn tokens_block(ast: &GrammarAst, token_names: &[&str]) -> String {
     }
     block.push('}');
     block
+}
+
+/// A section, with the notes that belong above it.
+fn push_section(sections: &mut Vec<String>, notes: Option<&Notes>, key: &str, text: String) {
+    let mut block = String::new();
+    comment(&mut block, notes.map(|notes| notes.for_section(key)), "");
+    block.push_str(&text);
+    sections.push(block);
+}
+
+/// A rule, with the notes that belong above it.
+fn push_rule(sections: &mut Vec<String>, notes: Option<&Notes>, name: &str, text: String) {
+    let mut block = String::new();
+    comment(&mut block, notes.map(|notes| notes.for_rule(name)), "");
+    block.push_str(&text);
+    sections.push(block);
+}
+
+/// Write `lines` as `//` comments, `indent` first.  Nothing happens for an empty
+/// slice, so every caller can pass `None`/`&[]` without a special case.
+fn comment(out: &mut String, lines: Option<&[String]>, indent: &str) {
+    for line in lines.unwrap_or(&[]) {
+        out.push_str(indent);
+        out.push_str("// ");
+        out.push_str(line);
+        out.push('\n');
+    }
 }
 
 fn unwrap_token(rule: &Expr) -> &Expr {
@@ -254,10 +324,15 @@ fn rule_text(name: &str, rule: &Expr) -> String {
     match &rule.kind {
         ExprKind::Choice(members) => {
             for member in members {
-                alternatives.push(expr(member, 0));
+                // `2`, not `0`: an alternative that is *itself* a choice
+                // (`a: (x | y) | z;`) has to keep its parentheses, or printing
+                // it would flatten `choice(choice(x, y), z)` into
+                // `choice(x, y, z)` — a different `grammar.json`, and the one
+                // thing `--fmt` promises it will not do.
+                alternatives.push(expr(member, 2));
             }
         }
-        _ => alternatives.push(expr(rule, 0)),
+        _ => alternatives.push(expr(rule, 2)),
     }
     let mut out = format!("{name}:\n");
     for (index, alternative) in alternatives.iter().enumerate() {
@@ -284,8 +359,8 @@ fn level(kind: &ExprKind) -> u8 {
 /// Print `node`, parenthesised if it binds looser than `minimum`.
 fn expr(node: &Expr, minimum: u8) -> String {
     let text = match &node.kind {
-        ExprKind::Str(value) => string(value),
-        ExprKind::Pattern { value, flags } => format!("/{value}/{flags}"),
+        ExprKind::Str(value) => quote(value),
+        ExprKind::Pattern { value, flags } => regex_literal(value, flags),
         ExprKind::Number(number) => number.to_string(),
         ExprKind::Symbol(name) => {
             // A rule may be called like a DSL function: `field` is both a call
@@ -345,27 +420,3 @@ fn call_names() -> [&'static str; 15] {
     ]
 }
 
-/// One quote style per literal: single quotes unless the value contains one,
-/// in which case double quotes with only the escapes that are needed.
-fn string(value: &str) -> String {
-    if !value.contains('\'')
-        && !value.contains('\\')
-        && !value.contains('\n')
-        && !value.contains('\r')
-    {
-        return format!("'{value}'");
-    }
-    let mut out = String::from("\"");
-    for character in value.chars() {
-        match character {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            other => out.push(other),
-        }
-    }
-    out.push('"');
-    out
-}

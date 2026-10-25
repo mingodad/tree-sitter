@@ -439,14 +439,14 @@ pub fn describe(src: &str) -> Res<String> {
     Ok(out)
 }
 
-fn productions(body: &Expr) -> Vec<&Expr> {
+pub(crate) fn productions(body: &Expr) -> Vec<&Expr> {
     match &body.kind {
         ExprKind::Choice(items) => items.iter().collect(),
         _ => vec![body],
     }
 }
 
-fn annotate_name(production: &Expr) -> Option<String> {
+pub(crate) fn annotate_name(production: &Expr) -> Option<String> {
     match &production.kind {
         ExprKind::Call { name, args } if name.starts_with("prec") && args.len() == 2 => {
             match &args[0].kind {

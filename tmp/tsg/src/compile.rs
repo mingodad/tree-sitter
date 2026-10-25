@@ -1932,6 +1932,37 @@ r: field= 'x';
         assert_eq!(ok(&printed), ok(src), "--fmt must not change the grammar");
     }
 
+    /// Found by the annotate gate over the corpus (bash, cpp, php, ts): an
+    /// alternative that is itself a choice kept no parentheses, so `--fmt`
+    /// flattened `choice(choice(x, y), z)` into `choice(x, y, z)`.
+    #[test]
+    fn fmt_keeps_the_parentheses_of_a_choice_alternative() {
+        let src = "%name t;\na: (prec.left(1, 'x' 'y') | prec.left(2, 'p' 'q')) | 'w';\n";
+        let printed = crate::emit::fmt(src).expect("formattable").text;
+        assert!(printed.contains("  | 'w';"), "{printed}");
+        assert!(printed.contains("prec.left(1, 'x' 'y') | prec.left(2, 'p' 'q')"), "{printed}");
+        assert_eq!(ok(&printed), ok(src), "--fmt must not change the grammar");
+    }
+
+    /// A value is not its source text: `'\0'` and `'\n'` were escapes in the
+    /// file, and printing the decoded value back writes a raw NUL or splits the
+    /// line. The grammar is the same either way, so only the *text* is wrong —
+    /// and text with a NUL in it stops being a `.tsg` file at all. Found by the
+    /// selfhost gate, which could not parse the corpus's `'\0'`.
+    #[test]
+    fn fmt_writes_escapes_instead_of_raw_bytes() {
+        let src = "%name t;\na: '\\0' | '\\x41' | \"a\\tb\" | 'q\\\\r';\n";
+        let printed = crate::emit::fmt(src).expect("formattable").text;
+        assert!(
+            !printed.chars().any(|c| (c as u32) < 0x20 && c != '\n'),
+            "a control byte survived: {printed:?}"
+        );
+        assert!(printed.contains(r"'\0'"), "{printed}");
+        assert!(printed.contains(r"'a\tb'"), "{printed}");
+        assert!(printed.contains(r"'q\\r'"), "{printed}");
+        assert_eq!(ok(&printed), ok(src), "--fmt must not change the grammar");
+    }
+
     #[test]
     fn a_tokens_block_rule_can_be_immediate() {
         let json = ok(r"

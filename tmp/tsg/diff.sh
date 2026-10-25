@@ -7,6 +7,13 @@
 # against the reference JSON produced by running the real JavaScript DSL
 # (crates/generate/src/dsl.js) under node on the original grammar.js.
 #
+# The comparison is `tree-sitter generate --stamp`, not a text compare: the
+# stamp is a hash of the parser the generator actually builds, after tokens are
+# extracted, inlines expanded and conflicts resolved. Two grammars with the
+# same stamp are the same parser, so a notational difference (rule order,
+# parentheses around a choice that does not change it) passes and a real one
+# fails. compare.py is run afterwards only to explain a failure.
+#
 # Usage:  ./diff.sh            (uses ./target/debug/tsg; override with TSG=)
 #         TSG=/path/to/tsg ./diff.sh
 set -uo pipefail
@@ -15,6 +22,12 @@ here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)  # repository root
 work="$here/.diff"
 tsg=${TSG:-$here/target/debug/tsg}
+ts=${TS:-$here/bin/tree-sitter}
+
+if [ ! -x "$ts" ]; then
+    echo "error: no tree-sitter CLI at $ts (see HANDOFF.md; override with TS=)" >&2
+    exit 2
+fi
 
 if [ ! -x "$tsg" ]; then
     echo "error: no tsg binary at $tsg (run \`cargo build\` or set TSG=)" >&2
@@ -54,15 +67,21 @@ for tsg_file in "$here"/examples/*.tsg; do
     fi
 
     checked=$((checked + 1))
-    if ! python3 "$here/compare.py" "$name" \
-            "$work/$name.expected.json" "$work/$name.actual.json"; then
+    expected_stamp=$("$ts" generate "$work/$name.expected.json" --stamp 2>&1)
+    actual_stamp=$("$ts" generate "$work/$name.actual.json" --stamp 2>&1)
+    if [ "$expected_stamp" != "$actual_stamp" ]; then
+        echo "FAIL $name  (the two front ends build different parsers)"
+        printf '%s\n' "$expected_stamp" | sed 's/^/     dsl.js: /'
+        printf '%s\n' "$actual_stamp" | sed 's/^/     tsg:    /'
+        python3 "$here/compare.py" "$name" \
+            "$work/$name.expected.json" "$work/$name.actual.json" | sed 's/^/     /'
         failures=$((failures + 1))
     fi
 done
 
 echo
 if [ "$failures" -eq 0 ]; then
-    echo "all $checked grammars match the JavaScript DSL byte-for-byte (structurally)"
+    echo "all $checked grammars build the same parser as the JavaScript DSL"
 else
     echo "$failures of $checked grammars differ"
 fi

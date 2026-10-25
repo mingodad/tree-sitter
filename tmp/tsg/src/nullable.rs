@@ -99,7 +99,7 @@ fn is_empty(expr: &Expr, nullable: &HashSet<String>) -> bool {
     }
 }
 
-fn collect_references(expr: &Expr, out: &mut HashMap<String, Vec<Span>>) {
+pub(crate) fn collect_references(expr: &Expr, out: &mut HashMap<String, Vec<Span>>) {
     match &expr.kind {
         ExprKind::Symbol(name) => out.entry(name.clone()).or_default().push(expr.span),
         ExprKind::Seq(items) | ExprKind::Choice(items) => {

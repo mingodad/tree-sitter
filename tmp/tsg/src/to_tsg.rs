@@ -11,7 +11,11 @@
 //! so the printer only needs to parenthesise a `CHOICE` or a multi-member `SEQ`
 //! when it appears below the juxtaposition level.
 
-use crate::{json::Json, lexer::is_ident_start, parser::is_valid_field_name, rules::CALL_NAMES};
+use crate::{
+    json::Json, lexer::is_ident_start,
+    literal::{quote, regex_literal}, parser::is_valid_field_name,
+    rules::CALL_NAMES,
+};
 
 const INDENT: &str = "    ";
 const WRAP_WIDTH: usize = 88;
@@ -511,67 +515,6 @@ fn is_ident(name: &str) -> bool {
         _ => return false,
     }
     chars.all(crate::lexer::is_ident_continue)
-}
-
-/// A string literal, picking the quote style that needs the fewest escapes.
-fn quote(value: &str) -> String {
-    let has_single = value.contains('\'');
-    let has_double = value.contains('"');
-    let quote = if has_single && !has_double { '"' } else { '\'' };
-
-    let mut out = String::with_capacity(value.len() + 2);
-    out.push(quote);
-    for c in value.chars() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\0' => out.push_str("\\0"),
-            c if c == quote => {
-                out.push('\\');
-                out.push(c);
-            }
-            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
-                out.push_str(&format!("\\x{:02x}", c as u32));
-            }
-            c => out.push(c),
-        }
-    }
-    out.push(quote);
-    out
-}
-
-/// A `/regex/flags` literal. A `/` outside a character class has to be escaped,
-/// because it would otherwise terminate the literal.
-fn regex_literal(value: &str, flags: &str) -> String {
-    let mut out = String::with_capacity(value.len() + 2);
-    out.push('/');
-    let mut in_class = false;
-    let mut escaped = false;
-    for c in value.chars() {
-        match c {
-            '\\' if !escaped => {
-                escaped = true;
-                out.push(c);
-                continue;
-            }
-            '[' if !escaped => {
-                in_class = true;
-                out.push(c);
-            }
-            ']' if !escaped => {
-                in_class = false;
-                out.push(c);
-            }
-            '/' if !escaped && !in_class => out.push_str("\\/"),
-            _ => out.push(c),
-        }
-        escaped = false;
-    }
-    out.push('/');
-    out.push_str(flags);
-    out
 }
 
 #[cfg(test)]

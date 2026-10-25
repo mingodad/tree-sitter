@@ -4,7 +4,11 @@
 # The corpus is every grammar.js in the repository, translated to grammar.json
 # by the *real* JavaScript DSL (crates/generate/src/dsl.js) under node. Each
 # document is then pushed through the reverse and forward front-ends and
-# compared structurally.
+# compared with `tree-sitter generate --stamp`: a hash of the parser the
+# generator builds from each side, after tokens are extracted, inlines expanded
+# and conflicts resolved. Same stamp means same parser, so text that moves
+# without changing the grammar passes, and one dropped alternative fails.
+# compare.py runs only to explain a failure.
 #
 # Usage:  ./roundtrip.sh             round-trip every corpus grammar
 #         ./roundtrip.sh --parsers   also byte-compare the generated parser.c
@@ -30,10 +34,16 @@ if [ ! -x "$tsg" ]; then
     echo "error: no tsg binary at $tsg (run \`cargo build\` or set TSG=)" >&2
     exit 2
 fi
-if [ "$parsers" -eq 1 ] && [ ! -x "$ts" ]; then
-    echo "error: --parsers needs the tree-sitter CLI at $ts (or set TS=)" >&2
+if [ ! -x "$ts" ]; then
+    echo "error: no tree-sitter CLI at $ts (see HANDOFF.md; override with TS=)" >&2
     exit 2
 fi
+
+# The oracle: build the parser and hash it. Fails (non-zero) where generation
+# fails, which is also how a grammar the generator refuses is recognised.
+stamp() {
+    "$ts" generate "$1" --stamp 2> "$work/stamp.err"
+}
 
 if [ "$parsers" -eq 1 ]; then
     free=$(df -m "$work" 2>/dev/null | awk 'NR == 2 { print $4 }')
@@ -76,20 +86,15 @@ done
 # Whether the parser generator refuses a grammar.json: the oracle for "the
 # `.tsg` front-end is allowed to refuse this".
 rejects() {
-    local dir="$work/reject"
-    rm -rf "$dir"
-    mkdir -p "$dir/src" || return 1
-    cp "$1" "$dir/src/grammar.json"
-    ! ( cd "$dir" && "$ts" generate src/grammar.json > /dev/null 2>&1 )
-    local status=$?
-    rm -rf "$dir"
-    return $status
+    ! stamp "$1" > /dev/null
 }
 
 # --- round trip --------------------------------------------------------------
 failures=0
 checked=0
+refused=0
 parser_failures=0
+annotation_failures=0
 
 for json in "$work"/corpus/*.json; do
     [ -e "$json" ] || continue
@@ -127,11 +132,64 @@ for json in "$work"/corpus/*.json; do
         failures=$((failures + 1))
         continue
     fi
-    if ! python3 "$here/compare.py" "$name" "$json" "$back"; then
+    if ! original_stamp=$(stamp "$json"); then
+        # The generator refuses this grammar (a fixture that is *about* a
+        # conflict, say), so there is no parser to hash. The printer is still
+        # held to the JSON: compare structurally, and require the round trip to
+        # stay refused -- printing must not turn an invalid grammar into one
+        # that builds.
+        refused=$((refused + 1))
+        if stamp "$back" > /dev/null; then
+            echo "FAIL $name  (the round trip turns a refused grammar into a valid one)"
+            failures=$((failures + 1))
+            continue
+        fi
+        if ! python3 "$here/compare.py" "$name" "$json" "$back"; then
+            failures=$((failures + 1))
+            continue
+        fi
+        checked=$((checked + 1))
+        continue
+    fi
+    if ! round_stamp=$(stamp "$back"); then
+        echo "FAIL $name  (the round trip does not build a parser)"
+        sed 's/^/     /' "$work/stamp.err"
+        failures=$((failures + 1))
+        continue
+    fi
+    if [ "$original_stamp" != "$round_stamp" ]; then
+        echo "FAIL $name  (the round trip builds a different parser)"
+        printf '%s\n' "$original_stamp" | sed 's/^/     original:  /'
+        printf '%s\n' "$round_stamp" | sed 's/^/     round trip: /'
+        python3 "$here/compare.py" "$name" "$json" "$back" | sed 's/^/     /'
         failures=$((failures + 1))
         continue
     fi
     checked=$((checked + 1))
+
+    # Annotating is a reading copy, not a rewrite: `--annotate` may only add
+    # comments, so the annotated file has to compile to the same JSON and `--fmt`
+    # of it has to equal `--fmt` of the original (ROADMAP item 4's acceptance).
+    annotated="$work/$name.annotated.tsg"
+    if ! "$tsg" --annotate "$tsg_file" -o "$annotated" 2> "$work/$name.err"; then
+        echo "FAIL $name  (--annotate)"
+        sed 's/^/     /' "$work/$name.err"
+        annotation_failures=$((annotation_failures + 1))
+    else
+        # The annotation may only add comments, so the JSON must be identical
+        # (`--diff`) -- and that is also the cheapest proof that the parser is:
+        # identical JSON cannot build a different parser.
+        if ! "$tsg" --diff "$tsg_file" "$annotated" > "$work/$name.err" 2>&1; then
+            echo "FAIL $name  (annotation changed the grammar)"
+            sed 's/^/     /' "$work/$name.err"
+            annotation_failures=$((annotation_failures + 1))
+        elif ! ( "$tsg" --fmt "$tsg_file" > "$work/$name.fmt.orig" 2> /dev/null &&
+                 "$tsg" --fmt "$annotated" > "$work/$name.fmt.annotated" 2> /dev/null &&
+                 cmp -s "$work/$name.fmt.orig" "$work/$name.fmt.annotated" ); then
+            echo "FAIL $name  (--fmt of the annotation differs)"
+            annotation_failures=$((annotation_failures + 1))
+        fi
+    fi
 
     if [ "$parsers" -eq 1 ]; then
         # Generate `parser.c` twice -- from the original JSON and from the JSON
@@ -173,10 +231,17 @@ done
 echo
 if [ "$failures" -eq 0 ]; then
     echo "all $checked corpus grammars round-trip exactly"
+    if [ "$refused" -gt 0 ]; then
+        echo "  ($refused of them are refused by the parser generator, so the"
+        echo "   JSON was compared instead of the built parser)"
+    fi
 else
     echo "$failures of $((checked + failures)) corpus grammars do not round-trip"
 fi
 if [ "$parser_failures" -ne 0 ]; then
     echo "$parser_failures grammars produce a different parser.c after the round trip"
 fi
-exit $((failures + parser_failures > 0))
+if [ "$annotation_failures" -ne 0 ]; then
+    echo "$annotation_failures grammars read differently after --annotate"
+fi
+exit $((failures + parser_failures + annotation_failures > 0))

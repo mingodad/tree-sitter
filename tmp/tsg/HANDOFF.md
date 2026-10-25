@@ -1286,3 +1286,75 @@ One measurement worth keeping: a postgres16 gate run needs ~150 MB free.  With
 22 MB it failed as `Failed to compile parser` with nothing but clang warnings in
 the log — i.e. **a disk-full gate run looks like a parser bug**, so check `df`
 before believing the message.
+
+## Addendum: `--annotate`, and the generator as the judge (after `af87342`)
+
+### `tsg --annotate` (ROADMAP item 4, tier A)
+
+`--fmt` plus the facts the front end already knows, attached to the item that
+owns them: tokens nothing produces, rules that can match nothing, where a
+precedence level lands, the priority order of the `tokens { … }` block, the
+extras/externals defaults.  `src/annotate.rs` reuses `lexing::analyse`,
+`nullable::analyse`, `Levels::from_ast` and `precedence::annotate_name`;
+`src/emit.rs` gained a `Notes` side table (`rule()`/`section()`) that only the
+annotate path fills, so `--fmt` and `--annotate` remain one printer.
+
+Measured: 333 comment lines on postgres16, 58 on sqlite3; all 92 corpus
+grammars compile to the same `grammar.json` with and without the comments, and
+`--fmt` of the annotated file is `cmp`-identical to `--fmt` of the original.
+Per-token `token N of M` ranks were tried and dropped: 169 notes on sqlite3
+buried the two dead tokens that matter.
+
+### What the gate found
+
+Two bugs, neither reachable by comparing `grammar.json`:
+
+1. **`--fmt` dropped parentheses around a choice alternative**
+   (`a: (x | y) | z;` printed as `a: x | y | z;`, i.e.
+   `choice(choice(x,y),z)` → `choice(x,y,z)`).  Hit bash, cpp, php, ts.
+   `rule_text` now prints alternatives with `expr(member, 2)`.
+2. **The printer wrote string values back as raw bytes.**  `'\\0'` came out as a
+   NUL byte and `'\\x41'` as `A`: the *value* is the same, so every JSON
+   comparison agreed, but the *file* stopped being text.  This is why
+   `selfhost.sh` failed on `_root_go.annotated.tsg` (14 NULs) and
+   `_root_python.annotated.tsg` (1).  Fixed by moving `to_tsg::quote` into
+   `src/literal.rs` and having both printers use it; `--fmt`/`--annotate` now
+   emit `'\\0'`, `'\\x07'`, `'a\\tb'`.
+
+### `tree-sitter generate --stamp` (the comparison everything uses now)
+
+Added to the generator (`crates/generate/src/generate.rs`,
+`docs/src/cli/generate.md`): runs the whole pipeline — `parse_grammar` →
+node types → `build_tables` → `render_c_code` — and prints
+
+```json
+{ "digest": "…", "node_types": "…", "bytes": 4656, "states": 4, "lex_states": 4 }
+```
+
+without writing anything.  `node_types` hashes `node-types.json`, because the
+parser alone does not carry every node-type decision.
+
+Why this shape: the input document is not what gets compiled — the build drops
+unreachable rules, extracts tokens, expands inlines and resolves conflicts, and
+those rewrites are only visible in the output.  So the oracle is the built
+parser, not the text.  Verified by test (`a_stamp_ignores_what_the_build_discards`,
+`a_stamp_notices_a_dropped_alternative`) and by hand: reordering rules or
+alternatives, or adding an unreachable rule, leaves `7ad4882426282053, 4 states`
+unchanged; dropping an alternative moves it.
+
+`diff.sh` and `roundtrip.sh` now decide by stamp; `compare.py` runs only to
+explain a failure.  The first wiring silently *skipped* the 10 fixtures the
+generator refuses (they are fixtures **about** conflicts), so refusal is itself
+checked now: a round trip may not turn a refused grammar into a valid one, and
+those 10 are compared as JSON.
+
+Gates after all of it: `tsg` lib tests **107**, translator **26**, `diff`
+**14/14** ("same parser as the JavaScript DSL"), `roundtrip` **92/92** (82 by
+stamp, 10 refused), `e2e` **16/16**, `selfhost` **green** ("parsed 58 files,
+26 677 lines of tsg, no ERROR or MISSING node"), `postgres16` (1 195 rules,
+1 378 states, 25 MB `parser.c`, 3.93 s).
+
+Disk lesson repeated: rebuilding the CLI in a fresh `CARGO_TARGET_DIR` needs
+~430 MB, and a `cargo test` for `crates/generate` filled the RAM disk at 27 MB
+free.  `.tsbuild/{debug,release/deps,build}` and `.g2tsg` are the things to
+delete; the `bin/` binaries survive.

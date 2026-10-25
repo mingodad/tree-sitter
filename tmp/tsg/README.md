@@ -85,6 +85,35 @@ and the body the rule is built from. It is a view of the grammar, not of the
 generated DFA: per-parse-state lexer states are derived by `build_tables` from
 valid-token sets, and the report says so rather than inventing them.
 
+`--annotate` (`-a`) is `--fmt` plus those facts, attached to the item that owns
+them:
+
+```sh
+$ tsg --annotate examples/named_precedences.tsg | head -14
+// test/fixtures/test_grammars/named_precedences/grammar.js
+%name named_precedences;
+
+%conflicts expression type;
+%conflicts expression nested_type;
+
+// ordering only: entries go from higher to lower precedence, and a production takes the level of its rightmost terminal
+// member_expression > 'and' > 'or'
+// nested_type > 'type_intersection' > 'type_union'
+%precedence member_expression 'and' 'or';
+%precedence nested_type 'type_intersection' 'type_union';
+
+// matches nothing, which is legal only for the start rule — and this is that rule
+program:
+    repeat(choice(expression_statement, declaration_statement));
+```
+
+It is still a `.tsg` file, so it compiles to the same `grammar.json` — comments
+never reach the JSON, `--diff` ignores them and `--fmt` drops them (saying how
+many). What it adds is what the file only *implies*: which alternatives a
+precedence level marks, tokens nothing produces, and which rules can match
+nothing. `--annotate` of an annotated file is the annotated file, so it is safe
+to keep as a reading copy.
+
 ## Files
 
 | Path | What |
@@ -108,15 +137,24 @@ valid-token sets, and the report says so rather than inventing them.
 
 Four harnesses in this directory compare the prototype against the real thing.
 
-### 1. `./diff.sh` — JSON-level equivalence
+### 1. `./diff.sh` — the same parser as the JavaScript DSL
 
 For each `examples/<name>.tsg` with a matching
 `test/fixtures/test_grammars/<name>/grammar.js`, it runs the **actual
 `crates/generate/src/dsl.js` under node** on the original `grammar.js`, then
-compares the resulting `grammar.json` against `tsg`'s output structurally
-(object key order ignored, array order significant, `rules` key order checked
-separately because rule order decides the start rule — the first rule not
-declared in a `tokens` block).
+asks the generator about both `grammar.json`s:
+
+```sh
+tree-sitter generate <grammar.json> --stamp
+```
+
+The stamp is a digest of the parser the generator builds (states, actions,
+token metadata, `node-types.json`) *after* unused rules are dropped, tokens are
+extracted, inlines are expanded, conflicts are resolved and the lexer tables
+are built. Two documents with the same stamp build the same parser, so this
+compares meaning instead of text: rule order, whitespace, and parentheses that
+do not change the rule tree pass; a dropped alternative, a moved precedence or a
+changed alias fails. `compare.py` still runs, but only to *explain* a failure.
 
 ```
 ok   aliased_rules          (7 rules)
@@ -167,9 +205,10 @@ all 16 grammars build; every one with a reference is byte-identical
 
 Every `grammar.js` in the repository is translated to `grammar.json` by the real
 `dsl.js`, and every `*.json` in this directory is used as-is. Each document is
-pushed through `tsg --from-json` to `.tsg`, compiled back with `tsg`, and
-compared structurally. Add `--parsers` to byte-compare the `parser.c` that each
-side produces.
+pushed through `tsg --from-json` to `.tsg`, compiled back with `tsg`, and both
+documents are stamped by the generator. Same stamp means the round trip was
+lossless. Add `--parsers` to byte-compare the `parser.c` that each side produces
+instead.
 
 ```
 building the corpus with the JavaScript DSL ...
@@ -179,14 +218,20 @@ ok   _root_cpp  (326 rules)
 ok   _root_kotlin  (203 rules)
 ...
 all 92 corpus grammars round-trip exactly
+  (10 of them are refused by the parser generator, so the
+   JSON was compared instead of the built parser)
 ```
 
 That is 17 real-world grammars — bash, c, cpp, dart, go, html, java, javascript,
 kotlin, mssql, php, plsql, python, ruby, rust, swift, typescript, from 19 to 756
-rules — plus the 75 test fixtures. With `--parsers`, 80 of the 92 also produce a
-**byte-identical `parser.c`**: 26.6 MB for mssql, 33.8 MB for kotlin, 25.9 MB
-for cpp. The other 12 are fixtures that `tree-sitter generate` rejects on both
-sides by design, and are reported as `SKIP`. No grammar diverges.
+rules — plus the 75 test fixtures. Of the 92, 82 are compared by the parser the
+generator builds from each side (26.6 MB of `parser.c` for mssql, 33.8 MB for
+kotlin, 25.9 MB for cpp); the other 10 are fixtures that `tree-sitter generate`
+refuses by design, so their `grammar.json` is compared instead, and the round
+trip must leave them refused. No grammar diverges.
+
+The stamp decides, not this repository: `roundtrip.sh` no longer carries an
+opinion about what counts as a change.
 
 These are not written to please this tool, and they exercise things the fixtures
 do not:

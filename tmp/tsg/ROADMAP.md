@@ -108,7 +108,7 @@ progress.  Removes the `x?` inlining explosion and the `bison/patch.py` hack.
 - Risk: an ε-cycle (`a: a?`) can loop at runtime.  Detect and reject it in
   `tsg` *and* in the generator; a hang is the worst possible failure mode.
 
-### 4. Reports as JSON, then the annotated dump  (~3 days)
+### 4. Reports as JSON, then the annotated dump  (~3 days) — tier A **done**
 
 The generator already computes everything; it prints it as `info!`-level text.
 Add `generate --report json` (per-rule state counts, conflicts with **rule
@@ -124,6 +124,24 @@ and is the first thing to ship.
   equals `--fmt` of the original.
 - Note: annotation is a **sidecar**; spans are front-end metadata and do not go
   into `grammar.json`.
+- **Shipped** (`tsg --annotate`, `src/annotate.rs`): dead tokens, rules that can
+  match nothing, where a precedence level lands, the priority order of the
+  `tokens { … }` block, extras and externals defaults. Measured: 333 comment
+  lines on postgres16, 58 on sqlite3, 92/92 corpus grammars unchanged by
+  `--diff`, `--fmt` of both identical.
+- **The gate found two bugs the JSON comparison could not name**, which is the
+  useful part: `--fmt` dropped the parentheses of a choice alternative
+  (`a: (x | y) | z;`), and the printer wrote string values back as raw bytes
+  (`'\0'` became a NUL, which is what made `selfhost.sh` fail on a corpus
+  grammar). Both fixed.
+- **Tier B (still open)**: `generate --report json` for facts the front end
+  cannot know. Start with the ones that are already collected but only printed
+  as warnings — unreachable/unproductive rules, shadowed extras, unnecessary
+  conflicts — then per-state conflict resolutions. Do **not** dump tables.
+- The comparison the two tiers share is now `generate --stamp` (a digest of the
+  built parser + `node-types.json`), because "same grammar" kept being
+  re-litigated in hand-written comparators. A formatter may move text; the stamp
+  says whether it moved meaning.
 
 ### 5. Small sugar, after the above  (each < 1 day)
 
