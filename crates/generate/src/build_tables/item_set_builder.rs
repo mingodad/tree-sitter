@@ -337,67 +337,6 @@ impl<'a> ParseItemSetBuilder<'a> {
         // called `symbols_to_process`.
         let mut symbols_to_process = Vec::new();
         let mut processed_non_terminals = FxHashSet::<NonTerminalIndex>::default();
-        for i in 0..syntax_grammar.variables.len() {
-            let root_index = NonTerminalIndex::new(i as u32);
-            let symbol = Symbol::non_terminal(i);
-            let first_set = result.first_sets.entry(symbol).or_default();
-            let reserved_first_set = result.reserved_first_sets.entry(symbol).or_default();
-
-            processed_non_terminals.clear();
-            symbols_to_process.clear();
-            symbols_to_process.push(root_index);
-            while let Some(index) = symbols_to_process.pop() {
-                for prod_id in syntax_grammar.variable_prod_ids(usize::from(index)) {
-                    if let Some(step) = syntax_grammar.production(prod_id).steps.first() {
-                        let symbol = step.symbol();
-                        match symbol.view() {
-                            SymbolView::Terminal(_) | SymbolView::External(_) => {
-                                first_set.insert(symbol);
-                            }
-                            SymbolView::NonTerminal(index) => {
-                                if processed_non_terminals.insert(index) {
-                                    symbols_to_process.push(index);
-                                }
-                            }
-                            SymbolView::End | SymbolView::EndOfNonTerminalExtra => unreachable!(),
-                        }
-                        *reserved_first_set =
-                            (*reserved_first_set).max(ReservedWordSetId(u32::from(step.reserved)));
-                    }
-                }
-            }
-
-            // The LAST set is defined in a similar way to the FIRST set.
-            let last_set = result.last_sets.entry(symbol).or_default();
-            processed_non_terminals.clear();
-            symbols_to_process.clear();
-            symbols_to_process.push(root_index);
-            while let Some(index) = symbols_to_process.pop() {
-                for prod_id in syntax_grammar.variable_prod_ids(usize::from(index)) {
-                    if let Some(step) = syntax_grammar.production(prod_id).steps.last() {
-                        let symbol = step.symbol();
-                        match symbol.view() {
-                            SymbolView::Terminal(_) | SymbolView::External(_) => {
-                                last_set.insert(symbol);
-                            }
-                            SymbolView::NonTerminal(index) => {
-                                if processed_non_terminals.insert(index) {
-                                    symbols_to_process.push(index);
-                                }
-                            }
-                            SymbolView::End | SymbolView::EndOfNonTerminalExtra => unreachable!(),
-                        }
-                    }
-                }
-            }
-        }
-
-        // Intern each FIRST set so closure propagation can union by id.
-        for (symbol, set) in &result.first_sets {
-            result
-                .first_set_ids
-                .insert(*symbol, result.lookaheads.intern_ref(set));
-        }
 
         // A nullable non-terminal makes the naive "look one step ahead" rule in
         // the closure wrong, so it has to be known here. It is a least fixed
@@ -429,6 +368,82 @@ impl<'a> ParseItemSetBuilder<'a> {
             if !changed {
                 break;
             }
+        }
+
+        for i in 0..syntax_grammar.variables.len() {
+            let root_index = NonTerminalIndex::new(i as u32);
+            let symbol = Symbol::non_terminal(i);
+            let first_set = result.first_sets.entry(symbol).or_default();
+            let reserved_first_set = result.reserved_first_sets.entry(symbol).or_default();
+
+            processed_non_terminals.clear();
+            symbols_to_process.clear();
+            symbols_to_process.push(root_index);
+            while let Some(index) = symbols_to_process.pop() {
+                for prod_id in syntax_grammar.variable_prod_ids(usize::from(index)) {
+                    // Walk past symbols that can match nothing: what starts the
+                    // production can be what starts any step after an empty one.
+                    for step in syntax_grammar.production(prod_id).steps {
+                        let symbol = step.symbol();
+                        let symbol_is_nullable = symbol
+                            .non_terminal_index()
+                            .is_some_and(|j| result.nullable_non_terminals.contains(&j));
+                        match symbol.view() {
+                            SymbolView::Terminal(_) | SymbolView::External(_) => {
+                                first_set.insert(symbol);
+                            }
+                            SymbolView::NonTerminal(index) => {
+                                if processed_non_terminals.insert(index) {
+                                    symbols_to_process.push(index);
+                                }
+                            }
+                            SymbolView::End | SymbolView::EndOfNonTerminalExtra => unreachable!(),
+                        }
+                        *reserved_first_set =
+                            (*reserved_first_set).max(ReservedWordSetId(u32::from(step.reserved)));
+                        if !symbol_is_nullable {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // The LAST set is defined in a similar way to the FIRST set.
+            let last_set = result.last_sets.entry(symbol).or_default();
+            processed_non_terminals.clear();
+            symbols_to_process.clear();
+            symbols_to_process.push(root_index);
+            while let Some(index) = symbols_to_process.pop() {
+                for prod_id in syntax_grammar.variable_prod_ids(usize::from(index)) {
+                    for step in syntax_grammar.production(prod_id).steps.iter().rev() {
+                        let symbol = step.symbol();
+                        let symbol_is_nullable = symbol
+                            .non_terminal_index()
+                            .is_some_and(|j| result.nullable_non_terminals.contains(&j));
+                        match symbol.view() {
+                            SymbolView::Terminal(_) | SymbolView::External(_) => {
+                                last_set.insert(symbol);
+                            }
+                            SymbolView::NonTerminal(index) => {
+                                if processed_non_terminals.insert(index) {
+                                    symbols_to_process.push(index);
+                                }
+                            }
+                            SymbolView::End | SymbolView::EndOfNonTerminalExtra => unreachable!(),
+                        }
+                        if !symbol_is_nullable {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Intern each FIRST set so closure propagation can union by id.
+        for (symbol, set) in &result.first_sets {
+            result
+                .first_set_ids
+                .insert(*symbol, result.lookaheads.intern_ref(set));
         }
 
         // For every production, the FIRST set of the suffix after each of its
