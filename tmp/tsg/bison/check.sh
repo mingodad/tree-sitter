@@ -4,11 +4,10 @@
 # bison.g is a grammar for the yacc dialect; carbon-lang.y is written in that
 # dialect, so parsing it is the end-to-end test of the translation.
 #
-# Two things are hand-supplied, and both are reported by `g2tsg` rather than
-# guessed at:
-#
-#   * bison.g has no Flex section, so `bodies.txt` holds the token bodies.
-#   * `patch.py` applies the four edits that need judgement (see its header).
+# The lexer comes from bison.g itself; the two tokens that only exist inside a
+# start condition (`<ACTION_CODE_ST>`, `<EPILOGUE_ST>`) cannot be expressed in a
+# stateless tree-sitter lexer, and `g2tsg` reports them and the productions it
+# drops.  `patch.py` applies the one edit that is left (see its header).
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/.." && pwd)
@@ -34,7 +33,7 @@ export XDG_CACHE_HOME="$work/cache"
 
 # 1. Translate, then apply the hand edits.  The committed grammar.tsg must stay
 #    the same grammar as that output: comments and layout are allowed to differ.
-"$g2" "$here/bison.g" -o "$work/gen.tsg" --name bison --bodies "$here/bodies.txt"
+"$g2" "$here/bison.g" -o "$work/gen.tsg" --name bison
 python3 "$here/patch.py" "$work/gen.tsg"
 if ! "$tsg" "$here/grammar.tsg" --diff "$work/gen.tsg" >&2; then
     echo "FAIL grammar.tsg is not the same grammar as the new translation $work/gen.tsg" >&2

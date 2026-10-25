@@ -79,6 +79,12 @@ pub struct Lexer {
     pub rules: Vec<(String, String)>,
     /// `%option caseless`, i.e. keywords are case-insensitive.
     pub caseless: bool,
+    /// What the reader could not express, in the source's own terms: rules that
+    /// only run in a start condition, patterns that could not be read. Reported
+    /// instead of dropped — a rule that disappears silently makes the
+    /// translator's later "the lexer never returns X" note blame the source for
+    /// a token it does return.
+    pub notes: Vec<String>,
 }
 
 #[derive(Clone, Debug)]

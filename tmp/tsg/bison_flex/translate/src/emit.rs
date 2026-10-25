@@ -39,6 +39,9 @@ pub struct Translation {
 }
 
 pub fn translate(grammar: &Grammar, options: &Options) -> Result<Translation, String> {
+    for note in &grammar.lexer.notes {
+        eprintln!("note: {note}");
+    }
     let mut tokens = Vec::new();
     let mut literals = Vec::new();
     let mut levels = Vec::new();

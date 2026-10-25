@@ -1099,33 +1099,51 @@ span between the items that own them (rules and directives both carry spans);
 that is the next step, and until it exists `--diff`, which ignores comments
 entirely, is the way to compare a reformatted file with its original.
 
-## Gate 9: `bison/check.sh` — a grammar-only `.g`, end to end
+## Gate 9: `bison/check.sh` — a `.g` with a lexer in the back
 
 `bison.g` is a grammar for the yacc dialect and `carbon-lang.y` is written in that
 dialect, so parsing it is the whole test: translate, generate, build, parse, and
 require zero `ERROR`/`MISSING` nodes.
 
-What the port actually cost — the honest number, since this is what "can we port
-another `.g`" means:
+**Correction to an earlier reading of this file.** `bison.g` *does* have a Flex
+lexer — it sits after the grammar (sections: declarations, rules, definitions,
+rules), and it was the translator that lost it, in two opposite ways:
 
-* `bison.g` has **no Flex section**, so `g2tsg` reports *"the lexer never returns
-  STRING, TSTRING, BRACKETED_ID and 7 more; dropped 75 production(s)"* and keeps
-  11 rules.  The token bodies live in `bison/bodies.txt` (12 tokens), and the
-  lexer did not exist anywhere else in the corpus.
-* `bison/patch.py` applies four edits that need judgement: drop `EPILOGUE`
-  (`(?s:.)+` would swallow the file), add comment extras, drop the epilogue rule
-  and its use, and allow a rule that opens with `|` (yacc's empty first
-  alternative) at the use site, because `rhs` cannot be nullable.
+* `<states> { … }` groups were skipped outright (a comment in `cst.rs` called
+  them "lookahead", which is true of `postgres16.g`'s `reject()` trick and false
+  of a plain Flex group). `bison.g` keeps its *entire* lexer in
+  `<INITIAL,RULES_ST> { … }`, so all of it went.
+* a rule with a state prefix but no group (`<EPILOGUE_ST>(?s:.)+ EPILOGUE`) was
+  *kept* with the prefix stripped, i.e. promoted to a rule that runs everywhere.
+  `(?s:.)+` then matches the whole file.
 
-Result: 38 `.tsg` rules → 346 generated rules, 2.9 MB `parser.c`, and
-`carbon-lang.y` parses to 4 365 nodes with **0 ERROR / 0 MISSING**.
+Both are fixed in `cst.rs::split_lexer_rules`, and the rule is now stated once:
 
-Two findings recorded, neither a blocker:
+* a `<states> { … }` group is expanded when it includes `INITIAL` (a stateless
+  lexer can express it), and kept out otherwise;
+* a rule whose only states are non-`INITIAL` is kept out;
+* a rule that names a target state (`pattern<X> action`) is kept, and the dropped
+  switch is counted;
+* everything kept out is *reported*, per class, with examples — a silently
+  dropped rule is indistinguishable from a token the source never had, which is
+  exactly how the earlier note ("the lexer never returns STRING, TSTRING,
+  BRACKETED_ID and 7 more") ended up blaming the source for its own lexer.
 
-* the shadowed-extra warning fires on benign token-boundary states — `` `%?{...}`
-  completes, so the transition on '\t' into an extra is never taken `` — for
-  literal tokens like `%?{...}` and `%<flag>` that are complete before any extra
-  could start.  Worth checking whether the report should ignore states where the
-  token has already ended, or the message should say "harmless here".
-* `bison.g` names a rule `alias`, which collides with the DSL call; `tsg` warns
-  and suggests `$alias`, and the translation needs no change.
+Measured over the 358-file corpus: 288 translate (was 287), **119 files now say
+which rules were left out for start conditions and 84 which could not be read**
+(previously silent); 85 files have `<state> {` groups and 12 of them include
+`INITIAL`, so those now expand. `bison.g` itself: 10 tokens and 3 extras from its
+own lexer, no hand-written bodies, 37 `.tsg` rules → 301 generated rules, 1.3 MB
+`parser.c`, and `carbon-lang.y` parses to 4 365 nodes with 0 ERROR / 0 MISSING.
+
+What is still genuinely untranslatable, and is reported as such: `ACTION_CODE`
+is a balanced-brace pushdown (`<ACTION_CODE_ST>` recurses on `{`, pops on `}`).
+No regex can do that, so the token has no body and the 11 productions that need
+it are dropped — including mid-rule actions. That is a lexer *state machine*, and
+tree-sitter has no place for one.
+
+One hand edit is left in `bison/patch.py`, and it is about grammar shape, not
+lexing: `ID_COLON` is the yacc hack that binds `name:` into one token, so a rule
+whose body opens with `|` needs an alternative at the use site, because `rhs`
+cannot be nullable (tsg rejects it, correctly, and says to move the emptiness to
+the caller).

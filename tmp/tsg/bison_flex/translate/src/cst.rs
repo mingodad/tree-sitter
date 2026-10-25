@@ -131,7 +131,9 @@ pub fn read(source: &[u8], language: &Language) -> Result<Grammar, InputError> {
     }
 
     lexer.macros = split_macros(&macros)?;
-    lexer.rules = split_lexer_rules(&lexer_rules)?;
+    let mut notes = Vec::new();
+    lexer.rules = split_lexer_rules(&lexer_rules, &mut notes)?;
+    lexer.notes = notes;
     // `%option caseless` sits with the definitions, not with the rules.
     lexer.caseless = macros
         .iter()
@@ -507,18 +509,29 @@ fn is_caseless_option(line: &str) -> bool {
     line.starts_with("%option") && line.split_whitespace().any(|word| word == "caseless")
 }
 
-/// `pattern action`.
+/// `pattern action`, one entry per rule.
 ///
-/// Flex actions are C, so the split is textual: the action is the last
-/// whitespace-separated token of the line, `<state>` prefixes and suffixes are
-/// start conditions, and `<state> { … }` blocks are how the source expresses
-/// lookahead (see the notes in `postgres16/grammar.tsg`).
-fn split_lexer_rules(lines: &[String]) -> Result<Vec<(String, String)>, InputError> {
+/// Flex rules may name start conditions, and tree-sitter builds one stateless
+/// lexer: a rule that can run in `INITIAL` is expressible, a rule that only runs
+/// in another state is not. So this keeps the expressible half and *reports* the
+/// rest instead of dropping it, because a silently dropped rule looks exactly
+/// like a `.g` that never had that token — which is how `bison.g`'s whole lexer
+/// (it lives in `<INITIAL,RULES_ST> { … }`) was lost, and why the translation
+/// then blamed the source for not returning `STRING`.
+///
+/// `<states> { … }` groups rules under the same start conditions, which is what
+/// Flex means by it, so a group that includes `INITIAL` expands to its rules.
+fn split_lexer_rules(
+    lines: &[String],
+    notes: &mut Vec<String>,
+) -> Result<Vec<(String, String)>, InputError> {
     let mut rules = Vec::new();
     let mut index = 0;
     // A `/* … */` block hides every line inside it: real lexers comment rules
     // out that way, and a commented-out rule must not win a token's body.
     let mut in_comment = false;
+    let mut entries: Vec<String> = Vec::new();
+    let mut state_only: Vec<String> = Vec::new();
     while index < lines.len() {
         let line = lines[index].trim();
         index += 1;
@@ -533,16 +546,46 @@ fn split_lexer_rules(lines: &[String]) -> Result<Vec<(String, String)>, InputErr
         if line.is_empty() || line.starts_with("//") || line.starts_with('%') {
             continue;
         }
-        // `<xstate> {` … `}`: a start-condition block, i.e. lookahead.
-        if line.starts_with('<') && line.ends_with('{') {
-            while index < lines.len() && lines[index].trim() != "}" {
+        // `<INITIAL,RULES_ST> {` … `}`: every line in the group carries those
+        // start conditions. Expand it when `INITIAL` is among them, and report
+        // it otherwise: a rule that only runs in `xformat_la` needs a lexer
+        // state that tree-sitter does not have.
+        let (states, _) = take_leading_states(line);
+        {
+            if line.ends_with('{') && !states.is_empty() {
+                let start = index;
+                while index < lines.len() && lines[index].trim() != "}" {
+                    index += 1;
+                }
+                let inner: Vec<String> = lines[start..index.min(lines.len())]
+                    .iter()
+                    .map(|line| line.trim().to_string())
+                    .collect();
                 index += 1;
+                if states.iter().any(|state| state == "INITIAL") {
+                    entries.extend(inner.into_iter().filter(|line| !line.is_empty()));
+                } else {
+                    state_only.extend(inner.into_iter().filter(|line| !line.is_empty()));
+                }
+                continue;
             }
-            index += 1;
+        }
+        entries.push(line.to_string());
+    }
+
+    let mut state_change = 0;
+    let mut unreadable: Vec<String> = Vec::new();
+    for entry in entries {
+        if entry.starts_with("/*") || entry.starts_with("//") {
             continue;
         }
-        let line = strip_start_condition(line);
-        let Some((pattern, action)) = split_pattern(&line) else {
+        let (states, rest) = take_leading_states(&entry);
+        if !states.is_empty() && !states.iter().any(|state| state == "INITIAL") {
+            state_only.push(entry.clone());
+            continue;
+        }
+        let Some((pattern, action)) = split_pattern(rest) else {
+            unreadable.push(entry.clone());
             continue;
         };
         // `[a-z]+ IDENT //FIXME`: the action is the token name, and the rest
@@ -553,14 +596,50 @@ fn split_lexer_rules(lines: &[String]) -> Result<Vec<(String, String)>, InputErr
             Some(_) => action,
             None => action,
         };
-        let pattern = strip_start_condition(pattern);
+        let (target, pattern) = take_trailing_states(pattern);
+        if !target.is_empty() {
+            state_change += 1;
+        }
         let pattern = pattern.trim();
         if pattern.is_empty() {
             continue;
         }
         rules.push((pattern.to_string(), action.trim().to_string()));
     }
+
+    if !state_only.is_empty() {
+        notes.push(format!(
+            "{} lexer rule(s) only run in a start condition, which tree-sitter cannot \
+             express (its lexer has no states); they were left out: {}. If a token below \
+             has no body, this is why",
+            state_only.len(),
+            summarize(&state_only),
+        ));
+    }
+    if state_change > 0 {
+        notes.push(format!(
+            "{state_change} lexer rule(s) switch to a start condition after matching; the \
+             switch was dropped, so the pattern applies in every state"
+        ));
+    }
+    if !unreadable.is_empty() {
+        notes.push(format!(
+            "{} lexer rule(s) could not be read and were left out: {}",
+            unreadable.len(),
+            summarize(&unreadable),
+        ));
+    }
     Ok(rules)
+}
+
+/// Up to three rules, for a one-line note.
+fn summarize(rules: &[String]) -> String {
+    let shown: Vec<String> = rules.iter().take(3).map(|rule| format!("`{rule}`")).collect();
+    if rules.len() > shown.len() {
+        format!("{} and {} more", shown.join(", "), rules.len() - shown.len())
+    } else {
+        shown.join(", ")
+    }
 }
 
 /// Split a Flex rule at the first whitespace that is not inside a character
@@ -592,32 +671,55 @@ fn split_pattern(line: &str) -> Option<(&str, &str)> {
     None
 }
 
-/// Drop a leading or trailing `<state>` (an unescaped one). Flex writes the
-/// start conditions of a rule this way, on either side of the pattern.
+/// The start conditions a rule names before its pattern: `<INITIAL>`, `<a,b>`,
+/// `<>` (none), or `.` (stay where you are), which this dialect writes as `<.>`.
 ///
 /// Only a list of state names counts: `<` and `>` are ordinary pattern
 /// characters, and bc.g's `==|<=|>=|!=|<|>` ends with one.
-fn strip_start_condition(text: &str) -> String {
-    let mut rest = text;
-    if let Some(after) = rest.strip_prefix('<') {
+fn take_leading_states(text: &str) -> (Vec<String>, &str) {
+    if let Some(after) = text.strip_prefix('<') {
         if let Some(end) = after.find('>') {
-            if is_state_list(&after[..end]) {
-                rest = &after[end + 1..];
+            if let Some(states) = states_of(&after[..end]) {
+                return (states, &after[end + 1..]);
             }
         }
     }
-    if let Some(end) = rest.strip_suffix('>') {
-        if let Some(start) = end.rfind('<') {
-            let inner = &end[start + 1..];
-            // `{LBrack}<>Argument>`: ANTLR's .g files write a stray `<>` before the
-            // state list, so allow the inner name to be preceded by one `>`.
-            let inner = inner.strip_prefix('>').unwrap_or(inner);
-            if !end[..start].ends_with('\\') && is_state_list(inner) {
-                rest = &end[..start];
-            }
-        }
+    (Vec::new(), text)
+}
+
+/// The start conditions a rule names after its pattern, i.e. where a match
+/// moves the lexer. tree-sitter has no states, so the caller reports the count.
+fn take_trailing_states(text: &str) -> (Vec<String>, &str) {
+    let trimmed = text.trim_end();
+    let Some(start) = trimmed.rfind('<') else {
+        return (Vec::new(), text);
+    };
+    if trimmed[..start].ends_with('\\') {
+        return (Vec::new(), text);
     }
-    rest.trim().to_string()
+    let inner = &trimmed[start + 1..];
+    let inner = inner.strip_suffix('>').unwrap_or(inner);
+    // `{LBrace}<>TargetLanguageAction>`: ANTLR's .g files write a stray `<>`
+    // before the state list, so allow the inner name to be preceded by one `>`.
+    let inner = inner.strip_prefix('>').unwrap_or(inner);
+    match states_of(inner) {
+        Some(states) => (states, trimmed[..start].trim_end()),
+        None => (Vec::new(), text),
+    }
+}
+
+/// `INITIAL`, `A,B`, empty, or `.` — a start-condition list, if the text is one.
+fn states_of(text: &str) -> Option<Vec<String>> {
+    if text == "." {
+        return Some(vec![".".to_string()]);
+    }
+    if text.is_empty() {
+        return Some(Vec::new());
+    }
+    if !is_state_list(text) {
+        return None;
+    }
+    Some(text.split(',').map(str::to_string).collect())
 }
 
 /// `INITIAL` or `A,B`: what Flex allows between the angle brackets that name

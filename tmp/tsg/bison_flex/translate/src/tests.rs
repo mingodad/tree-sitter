@@ -268,3 +268,54 @@ fn a_commented_out_lexer_rule_does_not_give_a_token_its_body() {
     ));
     assert!(text.contains("IDENT: /[a-z]+/;"), "{text}");
 }
+
+#[test]
+fn a_start_condition_group_that_includes_initial_is_expanded() {
+    // `bison.g` keeps its whole lexer in `<INITIAL,RULES_ST> { … }`. Flex means
+    // "these rules run in those states", so a group that includes INITIAL is
+    // expressible in a stateless lexer: expand it. Both the token body and the
+    // `skip()` extra have to come out of the group.
+    let text = translate(&with_definitions(
+        "%token IDENT",
+        "s : IDENT ;",
+        "SPACES\t[ \\t\\n]+",
+        "<INITIAL,RULES_ST> {\n    {SPACES} skip()\n    [a-z]+    IDENT\n}\n",
+    ));
+    assert!(text.contains("IDENT: /[a-z]+/;"), "{text}");
+    assert!(text.contains("%extra /([ \\t\\n]+)/;"), "{text}");
+}
+
+#[test]
+fn a_state_only_group_is_reported_and_a_state_change_is_reported() {
+    // A rule that only runs in `xformat_la` needs a lexer state tree-sitter does
+    // not have. Dropping it is right; dropping it *silently* is how a token
+    // ends up missing and the note blames the source for not returning it.
+    let grammar = read(&source(
+        "%token A",
+        "s : A ;",
+        "<xla> {\n    [0-9]+    A\n}\n",
+    ))
+    .expect("read");
+    assert!(
+        grammar
+            .lexer
+            .notes
+            .iter()
+            .any(|note| note.contains("start condition") && note.contains("[0-9]+")),
+        "{:?}",
+        grammar.lexer.notes
+    );
+
+    let grammar = read(&source("%token A", "s : A ;", "A<xla>    A\n")).expect("read");
+    assert!(
+        grammar
+            .lexer
+            .notes
+            .iter()
+            .any(|note| note.contains("switch to a start condition")),
+        "{:?}",
+        grammar.lexer.notes
+    );
+    // The pattern itself is still usable, so the rule is kept.
+    assert_eq!(grammar.lexer.rules, vec![("A".to_string(), "A".to_string())]);
+}
