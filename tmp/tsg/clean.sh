@@ -5,7 +5,9 @@
 # grammar (all of it is in .gitignore).
 #
 #   ./clean.sh                # scratch + generated parsers; keeps target/ bin/
-#   ./clean.sh --target       # also target/ (74 M; `tsg` must be rebuilt)
+#   ./clean.sh --target       # also every cargo target/ tree (tsg ~150 M,
+#                             #   bison_flex/translate ~135 M); rebuilds are 2-30 s
+#                             #   (see --binaries for the recipes)
 #   ./clean.sh --binaries     # also bin/ (patched tree-sitter, g2tsg)
 #   ./clean.sh --all          # both
 #   ./clean.sh --dry-run ...  # print what would go, remove nothing
@@ -59,7 +61,7 @@ echo "clean.sh: $root"
 # 1. Scratch from the check scripts.  A parse log or a copied corpus is worth
 #    nothing after the run that wrote it.
 for d in .self .roundtrip .diff .e2e .harness .xmode .probe .bc .ref .fmt \
-         .g2tsg bison_flex/.corpus; do
+         .g2tsg .tsbuild .tsgrel .scan .scan2 .scan3 bison_flex/.corpus; do
     prune "$root/$d"
 done
 # Any `.check` (gates build their parsers there) and any leftover `.old*`.
@@ -76,9 +78,15 @@ while IFS= read -r d; do prune "$d"; done < <(find "$root" -path '*/src/tree_sit
 while IFS= read -r d; do prune "$d"; done < <(find "$root" -maxdepth 3 -name lib -type d 2>/dev/null | sort)
 while IFS= read -r f; do prune "$f"; done < <(find "$root" -maxdepth 3 -name '*.dylib' -o -maxdepth 3 -name '*.so' 2>/dev/null | sort)
 
-# 3. Build trees, on request.  `target/` holds the `tsg` binary the gates and
-#    the translators call, so it is worth keeping between runs.
-[ "$want_target" = 1 ] && prune "$root/target"
+# 3. Build trees, on request.  `target/` holds the `tsg` binary the gates call,
+#    so it is worth keeping between runs — but there is more than one: the
+#    translator has its own (`bison_flex/translate/target`, 135 M), and pruning
+#    only `$root/target` used to leave that behind while reporting the space it
+#    did not free.  `-prune` stops `find` descending into a tree it will delete.
+if [ "$want_target" = 1 ]; then
+    while IFS= read -r d; do prune "$d"; done < <(find "$root" -maxdepth 4 \
+        -name target -type d -prune 2>/dev/null | sort)
+fi
 if [ "$want_binaries" = 1 ]; then
     prune "$root/bin"
     cat <<'EOF'
@@ -86,7 +94,7 @@ if [ "$want_binaries" = 1 ]; then
     CARGO_TARGET_DIR=tmp/tsg/.tsbuild CARGO_INCREMENTAL=0 \
     CARGO_PROFILE_RELEASE_STRIP=true cargo build --release --offline -p tree-sitter-cli
     cp tmp/tsg/.tsbuild/release/tree-sitter tmp/tsg/bin/tree-sitter && rm -rf tmp/tsg/.tsbuild
-    (cd tmp/tsg/bison_flex && ../bin/tree-sitter generate src/grammar.json)
+    (cd tmp/tsg && cargo build && ./bison_flex/build-parser.sh)   # parser.c for build.rs
     (cd tmp/tsg/bison_flex/translate && CARGO_TARGET_DIR=../../.g2tsg \
        CARGO_INCREMENTAL=0 cargo build --release --offline) &&
        cp tmp/tsg/.g2tsg/release/g2tsg tmp/tsg/bin/g2tsg && rm -rf tmp/tsg/.g2tsg

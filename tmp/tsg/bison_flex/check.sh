@@ -21,6 +21,11 @@ mkdir -p "$work/src" "$work/lib"
 export XDG_CACHE_HOME="$work/cache"
 export TREE_SITTER_LIBDIR="$work/lib"
 
+# The translator's build.rs compiles the metagrammar parser from `src/parser.c`,
+# which `clean.sh` deletes as generated output; regenerate it first so that
+# "run the gate" is always a complete answer to "make this work again".
+TSG="$tsg" TS="$ts" "$here/build-parser.sh" >/dev/null
+
 "$tsg" "$here/grammar.tsg" -o "$work/src/grammar.json"
 (cd "$work" && "$ts" generate src/grammar.json)
 (cd "$work" && "$ts" build --output lib/bison_flex.dylib . >/dev/null)

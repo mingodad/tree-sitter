@@ -1,0 +1,6 @@
+# The debug `target/` was 152 M of which 59 M was `incremental/` (the translator's
+# was 135 M, 30 M incremental) — on a 1 GiB ramdisk that is the difference between
+# a build that fits and one that does not. Nothing here needs incremental
+# compilation: the whole crate rebuilds in about a second.
+[build]
+incremental = false

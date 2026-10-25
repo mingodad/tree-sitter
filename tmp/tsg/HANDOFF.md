@@ -775,6 +775,14 @@ cp tmp/tsg/.tsbuild/release/tree-sitter tmp/tsg/bin/tree-sitter
 rm -rf tmp/tsg/.tsbuild
 ```
 
+**What is deliberately *not* in `bin/`: `tsg` itself.**  The gates call
+`$root/target/debug/tsg` on purpose — it is always the current source, so a gate
+can never pass against a stale compiler.  The cost is nil: on the largest grammar
+here (`postgres16/grammar.tsg`, 116 KB) the debug binary takes 50 ms and a release
+build 9 ms, next to `tree-sitter generate`'s 3.8 s.  A release copy in `bin/`
+would buy 40 ms and add a way to test the wrong binary.  `cargo build` after
+`clean.sh --target` takes 0.7 s.
+
 `cargo test --release -p tree-sitter-generate` (104 tests) is the only way to run
 the generator's tests here: a debug build of that crate is 277 MB and, with
 `CARGO_PROFILE_DEV_DEBUG=0`, the test binary fails to strip ("permission
@@ -782,8 +790,12 @@ denied") — the release profile reuses the artifacts above.
 
 `bin/g2tsg` (0.6 MB, release, stripped) is the `.g -> .tsg` translator, built the
 same way from `bison_flex/translate` (`CARGO_TARGET_DIR=.../.g2tsg
-cargo build --release --offline`; 43 MB while it lasts, the crate's tests are 19
-and pass).  `postgres16/check.sh` and `antlr/check.sh` need it as
+cargo build --release --offline`; 43 MB while it lasts, the crate's tests are 23
+and pass).  Its `build.rs` compiles `bison_flex/src/parser.c`, so run
+`./bison_flex/build-parser.sh` first when `target/` or that file has been cleaned:
+without it, `cargo build` there fails with "parser.c is missing" and nothing says
+how to get it back.  `bison_flex/check.sh` now calls the script, so a gate run is
+a complete repair.  `postgres16/check.sh` and `antlr/check.sh` need it as
 `G2TSG=$root/bin/g2tsg`.  Both were red today for reasons that had nothing to do
 with the generator:
 
@@ -850,13 +862,25 @@ Never leave the day's only copy on the RAM disk.
   build into a directory you delete when you stop, and say where it is in the
   session notes.  Do not leave it behind — that is what `ts-build/`, `ts-exp/`
   and `ts-up-target/` were.
-- `tmp/tsg/target/` (137 MB) is the exception that fits: `tsg` has zero
-  dependencies, so its own `cargo build`/`cargo test` run on the ramdisk.
+- `tmp/tsg/target/` is the exception that fits: `tsg` has zero dependencies, so
+  its own `cargo build`/`cargo test` run on the ramdisk.  With
+  `.cargo/config.toml` setting `build.incremental = false` it is **34 MB**, not
+  152 MB (59 MB of that was `incremental/`), and a from-scratch build is 0.7 s —
+  incremental compilation was costing 4× the disk to save 0.3 s.
 - **Zero dependencies** (`[dependencies]` is empty, `[workspace]` stanza present).
   crates.io returns 403 from this machine.
 - **Never `/tmp`.** Scratch goes in `tmp/tsg/.<harness>/`.
 - The ramdisk is 1.0 GiB total; keep an eye on `df -h /Volumes/RamDisk`.
-  `rm -rf target/*/incremental` reclaims ~40 MB; `bin/` is 35 MB and optional.
+  There are **two** cargo target trees — `target/` and
+  `bison_flex/translate/target/` (135 MB, the translator has `regex`) — plus
+  `bin/` (9 MB).  `./clean.sh --dry-run --target` is the inventory;
+  `./clean.sh --target` removes every `target/` under this directory.  It used
+  to prune only `$root/target` and report the space it had not freed, which is
+  how 135 MB sat there while the script said 274 MB had gone.
+- After `clean.sh --target`, the translator needs its metagrammar parser back:
+  `./bison_flex/build-parser.sh` (0.3 s) before `cargo build` in
+  `bison_flex/translate`.  `bison_flex/check.sh` calls it, so running the gate is
+  enough.
 - `tree-sitter generate` resolves a bare `src/grammar.json` relative to CWD, so
   run it from the grammar's parent directory.
 - Don't remove the 920 MB `rust-docs` component (declined earlier).
