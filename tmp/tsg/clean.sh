@@ -68,7 +68,7 @@ echo "clean.sh: $root"
 # 1. Scratch from the check scripts.  A parse log or a copied corpus is worth
 #    nothing after the run that wrote it.
 for d in .self .roundtrip .diff .e2e .harness .xmode .probe .bc .ref .fmt \
-         .g2tsg .tsbuild .tsgrel .scan .scan2 .scan3 bison_flex/.corpus; do
+         .g2tsg .tsbuild .tsgrel .scan .scan2 .scan3 .ch bison_flex/.corpus; do
     prune "$root/$d"
 done
 # Any `.check` (gates build their parsers there) and any leftover `.old*`.
