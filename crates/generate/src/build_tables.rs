@@ -119,23 +119,46 @@ pub fn build_tables(
     str_pool: &StrPool,
     report_symbol_name: Option<&str>,
     optimizations: OptLevel,
+    max_states: Option<usize>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> BuildTableResult<Tables> {
+    let timing = std::env::var_os("TS_DEBUG_TIMING").is_some();
+    let mut stage_time = std::time::Instant::now();
+    macro_rules! stage {
+        ($name:expr) => {
+            if timing {
+                let now = std::time::Instant::now();
+                eprintln!(
+                    "  stage {:24} {:>8.2}s",
+                    $name,
+                    now.duration_since(stage_time).as_secs_f64()
+                );
+                let _ = std::mem::replace(&mut stage_time, now);
+            }
+        };
+    }
+
     let item_key_map = ItemKeyMap::new(syntax_grammar, str_pool);
     let item_set_builder =
         ParseItemSetBuilder::new(syntax_grammar, lexical_grammar, inlines, &item_key_map);
     let following_tokens = get_following_tokens(syntax_grammar, lexical_grammar, &item_set_builder);
+    stage!("following_tokens");
     let (mut parse_table, parse_state_info) = build_parse_table(
         syntax_grammar,
         lexical_grammar,
         item_set_builder,
         variable_info,
         str_pool,
+        optimizations.contains(OptLevel::Lalr),
+        max_states,
         diagnostics,
     )?;
+    stage!("parse_table");
     let token_conflict_map = TokenConflictMap::new(lexical_grammar, following_tokens);
+    stage!("token_conflicts");
     let coincident_token_index =
         CoincidentTokenIndex::new(&parse_table, lexical_grammar, syntax_grammar.word_token);
+    stage!("coincident_tokens");
     let keywords = identify_keywords(
         lexical_grammar,
         syntax_grammar.word_token,
@@ -143,6 +166,7 @@ pub fn build_tables(
         &coincident_token_index,
         str_pool,
     );
+    stage!("identify_keywords");
     populate_error_state(
         &mut parse_table,
         syntax_grammar,
@@ -152,6 +176,7 @@ pub fn build_tables(
         &keywords,
         str_pool,
     );
+    stage!("error_state");
     populate_used_symbols(&mut parse_table, syntax_grammar, lexical_grammar);
     minimize_parse_table(
         &mut parse_table,
@@ -163,6 +188,7 @@ pub fn build_tables(
         str_pool,
         optimizations,
     );
+    stage!("minimize_parse_table");
     let lex_tables = build_lex_table(
         &mut parse_table,
         syntax_grammar,
@@ -172,8 +198,10 @@ pub fn build_tables(
         &token_conflict_map,
         str_pool,
     );
+    stage!("build_lex_table");
     populate_external_lex_states(&mut parse_table, syntax_grammar);
     mark_fragile_tokens(&mut parse_table, &token_conflict_map);
+    stage!("fragile_tokens");
     parse_table
         .action_lists
         .canonicalize(&mut parse_table.states);

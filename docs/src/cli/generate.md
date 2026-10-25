@@ -66,6 +66,25 @@ This avoids the dependency on a JavaScript runtime entirely. The native QuickJS 
 with ESM as well as with CommonJS in strict mode. If your grammar depends on `npm` to install dependencies such as base
 grammars, the native runtime can be used *after* running `npm install`.
 
+### `--lalr`
+
+Build LALR(1) parse states instead of canonical LR(1) states. States whose kernel items are identical, but whose
+lookahead sets differ, are merged and rebuilt, the way yacc and bison do it. For large grammars this can reduce the
+number of parse states (and the size of the generated table) by orders of magnitude, at the cost of reporting
+conflicts that canonical LR(1) states would have resolved away.
+
+This is mainly useful when porting a grammar that already works in yacc or bison. Bison builds LALR(1) tables, so a
+grammar that is conflict-free there normally generates with `--lalr` as well; if canonical LR(1) state generation is
+infeasible for it (generation takes minutes, or `--max-states` aborts), `--lalr` is what makes it generate at all. Any
+conflict that `--lalr` reports but bison does not is ambiguity the port introduced, so resolve it rather than adding a
+`conflicts` entry. This is not a general speed knob: it changes which states are built, and therefore the generated
+parser, so keep the default for grammars that were written for Tree-sitter.
+
+### `--max-states <N>`
+
+Abort parser generation with an error if the parser needs more than `N` parse states. This bounds the time and memory
+that `generate` can spend on a grammar whose state count is exploding, instead of leaving you to kill the process.
+
 ### `--disable-optimization`
 
 Disable optimizations when generating the parser. Currently, this only affects the merging of compatible parse states.
