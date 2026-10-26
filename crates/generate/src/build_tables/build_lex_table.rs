@@ -10,7 +10,7 @@ use super::{coincident_tokens::CoincidentTokenIndex, token_conflicts::TokenConfl
 use crate::{
     dedup::{SplitCriterion, split_state_id_groups},
     grammars::{LexicalGrammar, SyntaxGrammar},
-    nfa::{CharacterSet, NfaCursor},
+    nfa::{CharacterSet, NfaCursor, NfaState, NfaTransition},
     rules::{Symbol, SymbolView, TokenSet},
     strpool::StrPool,
     tables::{AdvanceAction, LexState, LexStateId, LexTable, ParseStateId, ParseTable},
@@ -22,6 +22,54 @@ pub struct LexTables {
     pub main_lex_table: LexTable,
     pub keyword_lex_table: LexTable,
     pub large_character_sets: Vec<(Option<Symbol>, CharacterSet)>,
+    pub report: LexReport,
+}
+
+/// A transition that the lexer table dropped because a token completes at the same point.
+///
+/// Because a lex state is built per *set* of valid tokens, the lexer can only keep
+/// transitions that every path through the state can take: where one token completes,
+/// another token's longer match is not viable any more, and a separator transition
+/// (an extra) loses to a completed token at equal precedence. That last rule is why
+/// `1 /* c */` can lex the `/` as a division operator: `Slash` completes on its first
+/// character, and the extra that would have continued into `*` is dropped.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Shadow {
+    /// The token that the lexer returns where the pruned transition would have started.
+    pub completed: Symbol,
+    /// Whether the pruned transition belonged to the separators (the extras) rather than
+    /// to a token body.
+    pub pruned_is_separator: bool,
+    /// The characters the pruned transition was labelled with.
+    pub characters: Vec<(char, char)>,
+    /// The extras the pruned transition would have continued into, when known.
+    pub pruned_extras: Vec<Symbol>,
+    /// The tokens the pruned transition would have continued into.
+    pub pruned_tokens: Vec<Symbol>,
+}
+
+/// What one lex state can lex, and what it dropped.
+#[derive(Clone, Debug, Default)]
+pub struct LexStateReport {
+    /// Whether a parse state starts lexing in this state. Continuation states have no
+    /// parse states, are not named by `ts_lex_modes`, and are only interesting as the
+    /// target of a transition.
+    pub is_entry: bool,
+    pub parse_states: Vec<ParseStateId>,
+    pub valid_tokens: Vec<Symbol>,
+    pub shadows: Vec<Shadow>,
+}
+
+/// The lexer described for humans rather than for the parser.
+#[derive(Clone, Debug, Default)]
+pub struct LexReport {
+    /// Indexed by final (generated) lex state id, before the table is deduplicated.
+    pub states: Vec<LexStateReport>,
+    /// The grammar's extras that are tokens or rules, in declaration order. An extra
+    /// written as a bare pattern has no symbol and does not appear here.
+    pub extras: Vec<Symbol>,
+    /// Whether the grammar has any extras at all, including bare patterns.
+    pub has_extras: bool,
 }
 
 pub fn build_lex_table(
@@ -33,8 +81,20 @@ pub fn build_lex_table(
     token_conflict_map: &TokenConflictMap,
     str_pool: &StrPool,
 ) -> LexTables {
+    let has_extras = lexical_grammar
+        .shared_nfa
+        .states
+        .iter()
+        .any(|state| matches!(state, NfaState::Advance { is_sep: true, .. }));
+    let mut is_extra = vec![false; lexical_grammar.variables.len()];
+    for symbol in &syntax_grammar.extra_symbols {
+        if let SymbolView::Terminal(index) = symbol.view() {
+            is_extra[usize::from(index)] = true;
+        }
+    }
+
     let keyword_lex_table = if syntax_grammar.word_token.is_some() {
-        let mut builder = LexTableBuilder::new(lexical_grammar);
+        let mut builder = LexTableBuilder::new(lexical_grammar, &is_extra);
         builder.add_state_for_tokens(keywords, str_pool);
         builder.table
     } else {
@@ -96,20 +156,38 @@ pub fn build_lex_table(
     }
 
     time("token_sets", &mut t0);
-    let mut builder = LexTableBuilder::new(lexical_grammar);
-    for (tokens, parse_state_ids) in parse_state_ids_by_token_set {
-        let lex_state_id = builder.add_state_for_tokens(&tokens, str_pool);
-        for id in parse_state_ids {
+    let mut builder = LexTableBuilder::new(lexical_grammar, &is_extra);
+    let mut lex_state_ids_by_token_set = Vec::with_capacity(parse_state_ids_by_token_set.len());
+    for (tokens, parse_state_ids) in &parse_state_ids_by_token_set {
+        let lex_state_id = builder.add_state_for_tokens(tokens, str_pool);
+        lex_state_ids_by_token_set.push(lex_state_id);
+        for &id in parse_state_ids {
             parse_table.states[id as usize].lex_state_id = lex_state_id;
         }
     }
-
     time("add_lex_states", &mut t0);
+
     let mut main_lex_table = mem::take(&mut builder.table);
-    minimize_lex_table(&mut main_lex_table, parse_table);
+    let shadows = mem::take(&mut builder.shadows);
+    let ids_by_group = minimize_lex_table(&mut main_lex_table, parse_table);
     time("minimize_lex_table", &mut t0);
-    sort_states(&mut main_lex_table, parse_table);
+    let ids_by_sorted = sort_states(&mut main_lex_table, parse_table);
     time("sort_states", &mut t0);
+    // `ids_by_group` goes from the id a token set was given to the id of its group, and
+    // `ids_by_sorted` from a group to the id it has in the final table.
+    let ids_by_lex_state = ids_by_group
+        .iter()
+        .map(|&group| ids_by_sorted[group])
+        .collect::<Vec<_>>();
+    let report = build_lex_report(
+        syntax_grammar,
+        has_extras,
+        main_lex_table.states.len(),
+        &parse_state_ids_by_token_set,
+        &lex_state_ids_by_token_set,
+        &ids_by_lex_state,
+        shadows,
+    );
 
     let mut large_character_sets = Vec::new();
     for (variable_ix, _variable) in lexical_grammar.variables.iter().enumerate() {
@@ -145,7 +223,43 @@ pub fn build_lex_table(
         main_lex_table,
         keyword_lex_table,
         large_character_sets,
+        report,
     }
+}
+
+/// Group the pruned transitions and the token sets under the lex state ids that survive
+/// [`minimize_lex_table`] and [`sort_states`].
+fn build_lex_report(
+    syntax_grammar: &SyntaxGrammar,
+    has_extras: bool,
+    state_count: usize,
+    parse_state_ids_by_token_set: &[(TokenSet, Vec<ParseStateId>)],
+    lex_state_ids_by_token_set: &[LexStateId],
+    ids_by_lex_state: &[usize],
+    shadows: Vec<(LexStateId, Shadow)>,
+) -> LexReport {
+    let mut report = LexReport {
+        states: vec![LexStateReport::default(); state_count],
+        extras: syntax_grammar.extra_symbols.clone(),
+        has_extras,
+    };
+
+    for ((tokens, parse_state_ids), &lex_state_id) in parse_state_ids_by_token_set
+        .iter()
+        .zip(lex_state_ids_by_token_set)
+    {
+        let state = &mut report.states[ids_by_lex_state[lex_state_id as usize]];
+        state.is_entry = true;
+        state.parse_states.extend_from_slice(parse_state_ids);
+        state.valid_tokens.extend(tokens.iter());
+    }
+
+    for (lex_state_id, shadow) in shadows {
+        report.states[ids_by_lex_state[lex_state_id as usize]]
+            .shadows
+            .push(shadow);
+    }
+    report
 }
 
 struct QueueEntry {
@@ -156,6 +270,8 @@ struct QueueEntry {
 
 struct LexTableBuilder<'a> {
     lexical_grammar: &'a LexicalGrammar,
+    /// For each token, whether it is one of the grammar's extras.
+    is_extra: &'a [bool],
     cursor: NfaCursor<'a>,
     /// For each state of the shared NFA, whether it may be used for the token set that is
     /// currently being processed. The separator block and the hub are always allowed; a
@@ -166,10 +282,15 @@ struct LexTableBuilder<'a> {
     table: LexTable,
     state_queue: VecDeque<QueueEntry>,
     state_ids_by_nfa_state_set: FxHashMap<(Vec<u32>, bool), LexStateId>,
+    /// Every transition dropped in favour of a completed token, with the entry state of
+    /// the token set it was dropped for (before minimization).
+    shadows: Vec<(LexStateId, Shadow)>,
+    /// The entry state of the token set being built.
+    entry_state: LexStateId,
 }
 
 impl<'a> LexTableBuilder<'a> {
-    fn new(lexical_grammar: &'a LexicalGrammar) -> Self {
+    fn new(lexical_grammar: &'a LexicalGrammar, is_extra: &'a [bool]) -> Self {
         let mut states_by_token = vec![Vec::new(); lexical_grammar.variables.len()];
         let mut allowed = Vec::with_capacity(lexical_grammar.shared_owner.len());
         for (state_id, &owner) in lexical_grammar.shared_owner.iter().enumerate() {
@@ -182,12 +303,15 @@ impl<'a> LexTableBuilder<'a> {
         }
         Self {
             lexical_grammar,
+            is_extra,
             cursor: NfaCursor::new(&lexical_grammar.shared_nfa, vec![]),
             allowed,
             states_by_token,
             table: LexTable::default(),
             state_queue: VecDeque::new(),
             state_ids_by_nfa_state_set: FxHashMap::default(),
+            shadows: Vec::new(),
+            entry_state: 0,
         }
     }
 
@@ -247,6 +371,8 @@ impl<'a> LexTableBuilder<'a> {
                     .collect::<Vec<_>>()
             );
         }
+
+        self.entry_state = state_id;
 
         let timing = log::log_enabled!(log::Level::Debug);
         let t0 = std::time::Instant::now();
@@ -347,6 +473,7 @@ impl<'a> LexTableBuilder<'a> {
                     has_sep,
                 )
             {
+                self.record_shadow(completed_id, &transition);
                 continue;
             }
 
@@ -367,6 +494,45 @@ impl<'a> LexTableBuilder<'a> {
         } else if self.cursor.state_ids.is_empty() {
             self.table.states[state_id as usize].accept_action = Some(Symbol::End);
         }
+    }
+}
+
+impl LexTableBuilder<'_> {
+    /// Remember what was dropped so that `--report-lex-states` can explain it.
+    fn record_shadow(&mut self, completed_id: usize, transition: &NfaTransition) {
+        let mut pruned_tokens = Vec::new();
+        let mut pruned_extras = Vec::new();
+        for &state in &transition.states {
+            let owner = self.lexical_grammar.shared_owner[state as usize];
+            if owner == u32::MAX {
+                continue;
+            }
+            let symbol = Symbol::terminal(owner as usize);
+            // The owner of a body state is its token; a state shared by several tokens
+            // has no owner, and its token cannot be named.
+            let bucket = if self.is_extra[owner as usize] {
+                &mut pruned_extras
+            } else {
+                &mut pruned_tokens
+            };
+            if !bucket.contains(&symbol) {
+                bucket.push(symbol);
+            }
+        }
+        self.shadows.push((
+            self.entry_state,
+            Shadow {
+                completed: Symbol::terminal(completed_id),
+                pruned_is_separator: transition.is_separator,
+                characters: transition
+                    .characters
+                    .ranges()
+                    .map(|range| (*range.start(), *range.end()))
+                    .collect(),
+                pruned_extras,
+                pruned_tokens,
+            },
+        ));
     }
 }
 
@@ -432,7 +598,10 @@ fn merge_token_set(
     true
 }
 
-fn minimize_lex_table(table: &mut LexTable, parse_table: &mut ParseTable) {
+/// Deduplicate the lex table's states and renumber the parse table's references.
+///
+/// Returns the final id of every state of the table as it was before the call.
+fn minimize_lex_table(table: &mut LexTable, parse_table: &mut ParseTable) -> Vec<usize> {
     // Initially group the states by their accept action and their
     // valid lookahead characters.
     let mut state_ids_by_signature = FxHashMap::default();
@@ -497,6 +666,10 @@ fn minimize_lex_table(table: &mut LexTable, parse_table: &mut ParseTable) {
     }
 
     table.states = new_states;
+    group_ids_by_state_id
+        .iter()
+        .map(|&id| id as usize)
+        .collect()
 }
 
 /// Separates lex states whose advance actions lead to different groups.
@@ -539,7 +712,10 @@ fn lex_states_differ(
         })
 }
 
-fn sort_states(table: &mut LexTable, parse_table: &mut ParseTable) {
+/// Reorder the states so that the error state comes first and the rest are sorted.
+///
+/// Returns the final id of every state of the table as it was before the call.
+fn sort_states(table: &mut LexTable, parse_table: &mut ParseTable) -> Vec<usize> {
     // Get a mapping of old state index -> new_state_index
     let mut old_ids_by_new_id = (0..table.states.len()).collect::<Vec<_>>();
     old_ids_by_new_id[1..].sort_by_key(|id| &table.states[*id]);
@@ -571,4 +747,6 @@ fn sort_states(table: &mut LexTable, parse_table: &mut ParseTable) {
     for state in &mut parse_table.states {
         state.lex_state_id = new_ids_by_old_id[state.lex_state_id as usize];
     }
+
+    new_ids_by_old_id.iter().map(|&id| id as usize).collect()
 }
