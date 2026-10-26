@@ -70,6 +70,65 @@ left-recursively, not a conflict-resolution difference. It is the part a human
 has to bless before `postgres16/grammar.tsg` is regenerated: the shape is what
 downstream queries and node counts are written against.
 
+## What the dump shows about the manual part
+
+`generate --dump-expanded` prints the grammar the table is actually built from,
+so the hand-fixing work can be read off it instead of guessed.  Comparing this
+copy with the checked-in one, both compiled from their `.tsg` by the same `tsg`:
+
+| | checked-in `postgres16/` | this copy |
+|---|---|---|
+| variables | 705 named, **0** invented by repetition | 628 named + **99** `*_repeatN` |
+| productions | 7 509 | 6 965 |
+| `%prec` step markers | 2 166 | 1 426 |
+
+Note the production count goes *down* while the variable count goes up: bison
+rules that were flat lists of alternatives become one production with a nested
+choice, and repetition becomes an auxiliary variable.  The reason is a single
+rewrite, and it is visible per rule.  `joined_table` is the whole story in six lines:
+
+```
+checked-in                                        this copy
+joined_table:                                     joined_table:
+  '(' %prec(p24 left) joined_table %prec(p24 left) ...   '(' %prec(p24 left) ... ')' %prec(p24 left) ;
+  table_ref %prec(p27 left) CROSS %prec(p27 left) ...    table_ref CROSS JOIN table_ref ;
+  table_ref %prec(p27 left) join_type %prec(p27 left) …  table_ref (CROSS JOIN table_ref | join_type JOIN … | …) ;
+```
+
+The source `.tsg` for those alternatives is byte-identical in both copies; the
+difference is entirely in lowering.  The rewrite factors the common
+`table_ref` prefix out of the alternatives and nests them in a choice, which
+(a) drops yacc's "a production inherits its last terminal's precedence" — the
+`CROSS` alternative no longer carries `p27` — and (b) changes the item set so
+`… CROSS JOIN table_ref • CROSS` has nothing left to tie-break.  That is why
+`joined_table` is one of the five entries added here, and why it cannot be
+removed without either whitelisting or writing the rule flat.
+
+Sorting all sixteen conflicts by what the dump shows:
+
+- **4 are the factorisation above** (`joined_table`, `expr_list`,
+  `func_arg_list`, `json_predicate_type_constraint`, plus `frame_bound` where
+  the inlined `opt_frame_clause` renamed an existing one): the dump shows a
+  grouped choice or a `*_repeatN` where the checked-in copy has a flat,
+  left-recursive alternative list.  These *can* be fixed in the grammar, by
+  writing the rule the way bison did — at the price of the tree shape, which is
+  the 182-line diff below.
+- **3 are precedence placement** (`a_expr`, `simple_select`, `table_ref`,
+  `func_table`, `ConstDatetime`): the dump shows the parent's precedence pushed
+  down onto *every* step (`'(' %prec(p24) joined_table %prec(p24) ')' %prec(p24)`)
+  instead of being on the trailing terminal as yacc would have it.
+- **4 are token identity** (`utility_option_name`, `target_el`,
+  `OptTempTableName`, `b_expr` with `bare_label_keyword`): the productions are
+  identical to the checked-in copy, so no grammar edit can help.  `FORMAT`,
+  `WITH`, `ABORT_P` and `TIME` are one text with several tokens; bison's scanner
+  chose before the table, tree-sitter's lexer offers and lets the state `%word`
+  decide.  Only the declarative lexer (`LEXER.md`) or external tokens close
+  these, which is why they are whitelisted here.
+
+The dump is a read-only instrument: you never edit it.  You edit `grammar.tsg`
+(write a rule flat, or change `%conflicts`), then re-run `tsg` and
+`generate --lalr`, and the dump answers *why* a conflict is still there.
+
 ## Status
 
 - `bin/g2tsg` is still the pre-fix binary; `grammar.tsg` here was produced by a
