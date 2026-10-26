@@ -86,7 +86,18 @@ impl Expander {
                     let symbol = Symbol::non_terminal(self.preceding + self.aux.len());
                     self.zero_width.push_variable(width);
                     self.memo.entry(hash).or_default().push((content, symbol));
-                    let root = wrap_in_binary_tree(pool, symbol, content);
+                    let root = if starts_with_zero_width(pool, &mut self.zero_width, content) {
+                        // A binary merge cannot be used when the content may
+                        // begin with a zero-width match: after two items the
+                        // parser must reduce `repeat1 repeat1` *or* take the
+                        // zero-width step that begins a third item, and both
+                        // are live, so every grammar of the shape
+                        // `repeat1(seq(nullable_rule, ';'))` is refused as
+                        // conflicting. Flat left recursion has no such state.
+                        wrap_flat(pool, symbol, content)
+                    } else {
+                        wrap_in_binary_tree(pool, symbol, content)
+                    };
                     self.aux.push(Variable { name, root });
                     pool.set_node(id, Rule::from(symbol));
                 }
@@ -276,6 +287,47 @@ impl ZeroWidth {
         }
         self.values.pop().unwrap_or_default()
     }
+}
+
+/// Whether `rule` can match zero characters at its *start* — the first symbol
+/// is absent, nullable, or a repetition. `repeat1(nullable_rule ';')` is the
+/// shape that the binary merge below cannot express (see the caller).
+fn starts_with_zero_width(
+    pool: &RulePool,
+    zero_width: &mut ZeroWidth,
+    rule: RuleId,
+) -> bool {
+    let mut current = rule;
+    loop {
+        match pool.node(current) {
+            Rule::Seq(range) => match pool.child_slice(range).first() {
+                Some(&first) => current = first,
+                None => return true,
+            },
+            Rule::Choice(range) => {
+                return pool
+                    .child_slice(range)
+                    .iter()
+                    .any(|&child| starts_with_zero_width(pool, zero_width, child));
+            }
+            Rule::Metadata { rule, .. } | Rule::Reserved { rule, .. } => current = rule,
+            Rule::Repeat(_) | Rule::Blank => return true,
+            _ => return zero_width.eval(pool, current).nullable,
+        }
+    }
+}
+
+/// `choice(seq(sym, inner), inner)`: one item per step, left recursive.
+fn wrap_flat(pool: &mut RulePool, symbol: Symbol, inner: RuleId) -> RuleId {
+    let s1 = pool.push_node(Rule::from(symbol));
+    let range = pool.push_children(&[s1, inner]);
+    let seq = pool.push_node(Rule::Seq(range));
+    let mut elements = vec![seq];
+    if !pool.subtree_eq(seq, inner) {
+        elements.push(inner);
+    }
+    let range = pool.push_children(&elements);
+    pool.push_node(Rule::Choice(range))
 }
 
 /// Build a repeat aux body of `choice(seq(sym, sym), inner)`
