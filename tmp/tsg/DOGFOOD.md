@@ -206,8 +206,8 @@ export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 (cd bison_flex/translate && cargo build --release)
 
 TSG=target/debug/tsg \
-TS=$HOME/.ts-build/release/tree-sitter \
-G2TSG=$HOME/.ts-build/release/g2tsg \
+TS=bin/tree-sitter \
+G2TSG=bin/g2tsg \
   ./antlr/check.sh
 ```
 
@@ -538,19 +538,18 @@ cd /Users/mingo/dev/ts-up && PATH="/opt/homebrew/opt/rustup/bin:$PATH" \
 `g2tsg` build (unchanged from dog-food #2):
 
 ```
-cd tmp/tsg/bison_flex/translate
+cd tmp/tsg
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
-CARGO_TARGET_DIR=$HOME/.ts-build cargo build --release --offline
-# binary: $HOME/.ts-build/release/g2tsg   (delete $HOME/.ts-build when you stop)
+./install.sh g2tsg        # bin/g2tsg, artefacts stay in bison_flex/translate/target
 ```
 
 Re-running the `bc` project end to end:
 
 ```
 cd /Volumes/RamDisk/tree-sitter/tmp/tsg/bc
-G=$HOME/.ts-build/release/g2tsg
+G=bin/g2tsg
 TSG=/Volumes/RamDisk/tree-sitter/tmp/tsg/target/debug/tsg
-TS=$HOME/.ts-build/release/tree-sitter
+TS=bin/tree-sitter
 export XDG_CACHE_HOME=/Volumes/RamDisk/tree-sitter/tmp/tsg/.bc/cache
 $G bc.g -o grammar.tsg --name bc \
    --title "bc calculator, translated from bc.g (Bison + Flex)." --conflicts conflicts.txt

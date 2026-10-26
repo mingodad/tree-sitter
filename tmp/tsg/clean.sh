@@ -18,8 +18,8 @@
 # Freeing the ramdisk is the point, so removing build trees is the *default*:
 # it used to need --target, and the failure mode was a "freed 0 M" summary with
 # 350 M of target/ left behind.  Nothing outside this directory is ever
-# removed, so a CARGO_TARGET_DIR elsewhere (~/.ts-build in the recipes) is only
-# reported, never deleted.
+# removed, so a CARGO_TARGET_DIR elsewhere (`~/.ts-build`, which an earlier
+# recipe wrongly used) is only reported, never deleted.
 #
 # Never touches anything outside this directory.  The two things worth
 # protecting by hand are bin/tree-sitter (a release build of this checkout with
@@ -127,7 +127,7 @@ echo "clean.sh: $root"
 # 1. Scratch from the check scripts.  A parse log or a copied corpus is worth
 #    nothing after the run that wrote it.
 for d in .self .roundtrip .diff .e2e .harness .xmode .probe .bc .ref .fmt \
-         .g2tsg .tsbuild .tsgrel .scan .scan2 .scan3 .ch bison_flex/.corpus; do
+         .g2tsg .tsbuild .tsgrel .scan .scan2 .scan3 .ch .cargo bison_flex/.corpus; do
     prune "$root/$d"
 done
 # Any `.check` (gates build their parsers there) and any leftover `.old*`.
@@ -159,7 +159,7 @@ if [ "$want_target" = 1 ]; then
     while IFS= read -r d; do prune "$d"; done < <(find "$root" -maxdepth 6 \
         -name target -type d -prune 2>/dev/null | sort)
     # A redirector target dir (`.tsbuild`, `.xt`) is ours too, when it is inside;
-    # when it is elsewhere (~/.ts-build in the recipes) it is only reported.
+    # when it is elsewhere it is only reported, never deleted.
     if [ -n "${CARGO_TARGET_DIR:-}" ]; then
         ctd_real=$(cd "$CARGO_TARGET_DIR" 2>/dev/null && pwd -P) || ctd_real=
         case ${ctd_real:-none} in

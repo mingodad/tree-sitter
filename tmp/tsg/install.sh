@@ -19,9 +19,21 @@ set -eu
 here=$(cd -- "$(dirname -- "$0")" && pwd)
 cd "$here"
 
-if [ -f "$here/.ch/registry" ] || [ -d "$here/.ch" ]; then
-    CARGO_HOME=${CARGO_HOME:-$here/.ch}
-    export CARGO_HOME
+# cargo writes ~/.cargo/.global-cache on every invocation, which is a write
+# outside this directory; pin CARGO_HOME here.  No registry is needed for `tsg`
+# (zero dependencies), so an empty directory is enough.
+CARGO_HOME=$here/.cargo
+export CARGO_HOME
+mkdir -p "$CARGO_HOME"
+if [ -n "${CARGO_TARGET_DIR:-}" ]; then
+    case $(cd "$CARGO_TARGET_DIR" 2>/dev/null && pwd -P) in
+        "$here"|"$here"/*) ;;
+        *)
+            echo "install.sh: CARGO_TARGET_DIR=$CARGO_TARGET_DIR is outside $here" >&2
+            echo "install.sh: unset it; the patched CLI has ./build-cli.sh" >&2
+            exit 2
+            ;;
+    esac
 fi
 
 echo "== building tsg (release)"
@@ -33,7 +45,9 @@ echo "== installed bin/tsg ($(wc -c < bin/tsg | tr -d ' ') bytes, $(bin/tsg --ve
 
 if [ "${1:-}" = g2tsg ]; then
     echo "== building g2tsg (release)"
-    (cd bison_flex/translate && cargo build --release --offline -q)
+    (cd bison_flex/translate &&
+        CARGO_TARGET_DIR="$here/bison_flex/translate/target" \
+            cargo build --release --offline -q)
     cp bison_flex/translate/target/release/g2tsg bin/g2tsg
     echo "== installed bin/g2tsg ($(wc -c < bin/g2tsg | tr -d ' ') bytes)"
 fi

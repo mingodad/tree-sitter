@@ -55,13 +55,16 @@ run (`1 /* … */` lexes the `/` as division; reproduced on upstream `0fff6ab`).
 `TS` (the *patched* CLI — `--lalr` does not exist upstream) and `G2TSG` (the
 translator, below) in the environment; see `DOGFOOD.md` for the exact command.
 
-The generator itself is patched (see the next section); build it off the ramdisk:
+The generator itself is patched (see the next section); build it with
 
 ```
-export PATH="/opt/homebrew/opt/rustup/bin:$PATH" CARGO_TARGET_DIR=$HOME/.ts-build
-cd /Volumes/RamDisk/tree-sitter && cargo build --release -p tree-sitter-cli   # ~40 s warm, 3 min cold
-# binary: $HOME/.ts-build/release/tree-sitter
+cd /Volumes/RamDisk/tree-sitter/tmp/tsg
+./build-cli.sh      # 27 s, bin/tree-sitter, .tsbuild removed at the end
+./install.sh        # bin/tsg
 ```
+
+Both keep `CARGO_HOME` and `CARGO_TARGET_DIR` inside `tmp/tsg`; see
+§"Toolchain provenance" for the measured peak (834 M of the 1024 M ramdisk).
 
 `ts-build/` and `ts-exp/clean-target/` are **deleted** (2.7 GB): nothing of this
 project is allowed to sit outside `tmp/tsg`, so a build target dir is created when
@@ -747,10 +750,10 @@ bin/tree-sitter       prebuilt CLI, 8.6 MB: release+stripped build of
                       the repo's `wip` commits (NOT stock: it has --lalr,
                       --max-states, --report-states-for-rule,
                       --report-lex-states, --stamp, --dump-expanded).
-                      Rebuild with CARGO_TARGET_DIR=~/.ts-build and
-                      CARGO_PROFILE_RELEASE_STRIP=true: the debug profile for
-                      the whole CLI tree is ~550 MB and does not fit on the
-                      ramdisk, a stripped release build is 27 s.
+                      Rebuild with ./build-cli.sh: the debug profile for the
+                      whole CLI tree is ~550 MB and does not fit on the
+                      ramdisk; a stripped release build is 27 s and its 420 MB
+                      build tree is deleted afterwards.
 target/ .diff/ .e2e/ .roundtrip/ .self/    build output and scratch, gitignored
 ```
 
@@ -792,17 +795,28 @@ work with no path in `target/` and no intermediate JSON.
 `bin/tree-sitter` is **the patched CLI** (release, stripped, 8.5 MB) built from
 `/Volumes/RamDisk/tree-sitter` at patches `0001`-`0011`; it is not stock 0.28.0.  Consequence: `postgres16/check.sh` and
 `bc/` need `--lalr`/`--max-states` and **cannot** run on a stock CLI, so do not
-"just download a release binary" and expect the gates to pass.  Rebuild recipe
-(build **off** the ramdisk: the CLI's debug profile is ~550 MB and does not fit;
-a stripped release build is 27 s):
+"just download a release binary" and expect the gates to pass.  Rebuild recipe — **one command, and nothing is written outside this
+directory**:
 
 ```
-export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
-cd /Volumes/RamDisk/tree-sitter
-CARGO_TARGET_DIR=$HOME/.ts-build CARGO_INCREMENTAL=0 \
-  CARGO_PROFILE_RELEASE_STRIP=true cargo build --release --offline -p tree-sitter-cli
-cp $HOME/.ts-build/release/tree-sitter tmp/tsg/bin/tree-sitter
+./build-cli.sh          # 27 s, peak 834 M of the 1024 M ramdisk, self-cleaning
 ```
+
+`build-cli.sh` cds up to the workspace, pins `CARGO_HOME=.cargo` and
+`CARGO_TARGET_DIR=.tsbuild` (both inside `tmp/tsg`, both gitignored), copies
+`bin/tree-sitter`, records `bin/VERSIONS`, and deletes the 420 MB build tree.
+`.cargo/registry` is a **copy** of `~/.cargo/registry` — a symlink would let
+cargo write back into the home directory.
+
+Two rules this recipe exists to enforce, both broken once already:
+
+- **Nothing outside `tmp/tsg/`.**  The CLI's debug profile is ~550 MB and does
+  not fit, so an earlier recipe pointed `CARGO_TARGET_DIR` at `~/.ts-build`;
+  that wrote 408 MB onto the SSD, plus `~/.cargo/.global-cache` on every build
+  because `CARGO_HOME` was not pinned.  `install.sh`, `build-cli.sh` and
+  `clean.sh` all keep their artefacts inside and refuse paths that leave.
+- **Do not delete `target/` to make room** — `./clean.sh` removes the trees it
+  owns, and `.tsbuild` is removed by `build-cli.sh` when it finishes.
 
 **What is deliberately *not* in `bin/`: `tsg` itself.**  The gates call
 `$root/target/debug/tsg` on purpose — it is always the current source, so a gate
@@ -911,8 +925,8 @@ Never leave the day's only copy on the RAM disk.
   `./clean.sh` printed "freed 0 M" with 350 MB still on the disk.  Use
   `--keep-target` when you would rather keep `target/debug/tsg` (the gates need
   it; rebuilding costs ~15 s).  A `CARGO_TARGET_DIR` outside this directory
-  (`~/.ts-build` in the release recipe) is reported with its size and never
-  removed.
+  (an earlier recipe wrongly used `~/.ts-build`) is reported with its size and
+  never removed.
 - After `clean.sh --target`, the translator needs its metagrammar parser back:
   `./bison_flex/build-parser.sh` (0.3 s) before `cargo build` in
   `bison_flex/translate`.  `bison_flex/check.sh` calls it, so running the gate is

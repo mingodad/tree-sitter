@@ -3,10 +3,13 @@
 # provenance" has the recipes (the patched `bin/tree-sitter` is a release build
 # of this checkout, `bin/g2tsg` a release build of bison_flex/translate).
 # Scratch from the check scripts (parse logs, corpus copies, built parsers).
-# `.ch` is CARGO_HOME: cargo writes ~/.cargo/.global-cache on every build,
-# which must not happen (nothing outside this directory is written), so the
-# gates and recipes point CARGO_HOME here with `registry` symlinked in.
+# CARGO_HOME and CARGO_TARGET_DIR: cargo writes ~/.cargo/.global-cache on every
+# build, which must not happen (nothing outside this directory is written), so
+# the recipes point both here.  `.cargo/` is a *copy* of ~/.cargo/registry
+# (a symlink would let cargo write back out), `.tsbuild/` is the CLI's build
+# tree, both regenerable and both pruned by clean.sh.
 .ch/
+.cargo/
 .tsbuild/
 .self/
 .roundtrip/
