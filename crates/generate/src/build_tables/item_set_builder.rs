@@ -50,12 +50,33 @@ pub struct ParseItemSetBuilder<'a> {
     first_set_ids: FxHashMap<Symbol, LookaheadSetId>,
     reserved_first_sets: FxHashMap<Symbol, ReservedWordSetId>,
     last_sets: FxHashMap<Symbol, TokenSet>,
+    /// For each production, the *suffix* after each of its steps: which tokens
+    /// can come next from that position, and whether the suffix can match
+    /// nothing.
+    ///
+    /// A nullable rule breaks the naive "look one step ahead" rule: in
+    /// `a: b c` with `c` nullable, what follows `b` is not just FIRST(`c`), it
+    /// is FIRST(`c`) *or whatever follows `a`*. The suffix answers that: it
+    /// runs past every nullable step, and when it reaches the end of the
+    /// production `nullable` is true, so the item's own lookaheads are used.
+    step_suffixes: Vec<Vec<SuffixInfo>>,
+    /// The non-terminals that can match the empty string. A `requires_eof_lookahead`
+    /// production is *not* nullable: it can only complete at end of input.
+    nullable_non_terminals: FxHashSet<NonTerminalIndex>,
     inlines: &'a InlinedProductionMap,
     pub key_map: &'a ItemKeyMap,
     pub lookaheads: LookaheadSetPool,
     transitive_closure_additions: Vec<Vec<TransitiveClosureAddition<'a>>>,
     /// Scratch for [`Self::transitive_closure`].
     closure_scratch: ClosureEntries<'a>,
+}
+
+/// What can follow a step in a production. See [`ParseItemSetBuilder::step_suffixes`].
+#[derive(Clone, Copy, Debug, Default)]
+struct SuffixInfo {
+    first: LookaheadSetId,
+    reserved: ReservedWordSetId,
+    nullable: bool,
 }
 
 /// Pushes `value` unless `vector` already has it. `indices` holds the positions
@@ -268,6 +289,8 @@ impl<'a> ParseItemSetBuilder<'a> {
             first_set_ids: FxHashMap::default(),
             reserved_first_sets: FxHashMap::default(),
             last_sets: FxHashMap::default(),
+            step_suffixes: Vec::new(),
+            nullable_non_terminals: FxHashSet::default(),
             inlines,
             key_map,
             lookaheads: LookaheadSetPool::new(),
@@ -376,6 +399,98 @@ impl<'a> ParseItemSetBuilder<'a> {
                 .insert(*symbol, result.lookaheads.intern_ref(set));
         }
 
+        // A nullable non-terminal makes the naive "look one step ahead" rule in
+        // the closure wrong, so it has to be known here. It is a least fixed
+        // point like FIRST: a variable is nullable when one of its productions
+        // can match nothing. `requires_eof_lookahead` productions consumed no
+        // step (the `eof()` is dropped) but they pin the production to the end
+        // of the input, so they are *not* nullable and must not be counted.
+        loop {
+            let mut changed = false;
+            for i in 0..syntax_grammar.variables.len() {
+                let index = NonTerminalIndex::new(i as u32);
+                if result.nullable_non_terminals.contains(&index) {
+                    continue;
+                }
+                let nullable = syntax_grammar.variable_prod_ids(i).any(|prod_id| {
+                    let production = syntax_grammar.production(prod_id);
+                    !production.requires_eof_lookahead
+                        && production.steps.iter().all(|step| {
+                            step.symbol()
+                                .non_terminal_index()
+                                .is_some_and(|j| result.nullable_non_terminals.contains(&j))
+                        })
+                });
+                if nullable {
+                    result.nullable_non_terminals.insert(index);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+
+        // For every production, the FIRST set of the suffix after each of its
+        // steps, and whether that suffix can be empty. Walking from the end:
+        // a nullable step adds its own FIRST set to the suffix it starts,
+        // anything else replaces it. A production that requires an `eof()`
+        // lookahead ends in an implicit end-of-input, so its last suffix is
+        // `{eof}` rather than empty.
+        let mut suffixes = Vec::with_capacity(syntax_grammar.productions.len());
+        for prod_id in 0..syntax_grammar.productions.len() as u32 {
+            let production = syntax_grammar.production(prod_id);
+            let steps = production.steps;
+            let mut at_end = SuffixInfo {
+                first: LookaheadSetPool::EMPTY,
+                reserved: ReservedWordSetId::default(),
+                nullable: true,
+            };
+            if production.requires_eof_lookahead {
+                let mut eof = TokenSet::new();
+                eof.insert(Symbol::End);
+                at_end.first = result.lookaheads.intern(eof);
+                at_end.nullable = false;
+            }
+            let mut per_step = vec![SuffixInfo::default(); steps.len() + 1];
+            per_step[steps.len()] = at_end;
+            for i in (0..steps.len()).rev() {
+                let symbol = steps[i].symbol();
+                let symbol_is_nullable = symbol
+                    .non_terminal_index()
+                    .is_some_and(|j| result.nullable_non_terminals.contains(&j));
+                let first = result
+                    .first_sets
+                    .get(&symbol)
+                    .cloned()
+                    .unwrap_or_default();
+                let reserved = result
+                    .reserved_first_sets
+                    .get(&symbol)
+                    .copied()
+                    .unwrap_or_default();
+                if symbol_is_nullable {
+                    // FIRST(`symbol` suffix) = FIRST(symbol) ∪ FIRST(suffix).
+                    let mut combined = first;
+                    combined.insert_all(result.lookaheads.get(at_end.first));
+                    at_end = SuffixInfo {
+                        first: result.lookaheads.intern(combined),
+                        reserved: reserved.max(at_end.reserved),
+                        nullable: at_end.nullable,
+                    };
+                } else {
+                    at_end = SuffixInfo {
+                        first: result.lookaheads.intern(first),
+                        reserved,
+                        nullable: false,
+                    };
+                }
+                per_step[i] = at_end;
+            }
+            suffixes.push(per_step);
+        }
+        result.step_suffixes = suffixes;
+
         // To compute an item set's transitive closure, we find each item in the set
         // whose next symbol is a non-terminal, and we add new items to the set for
         // each of that symbol's productions. These productions might themselves begin
@@ -404,10 +519,10 @@ impl<'a> ParseItemSetBuilder<'a> {
         //     occur after `item`.
         //
         // Rather than computing these additions recursively, we use an explicit stack.
-        let empty_lookaheads = TokenSet::new();
-        let mut eof_lookaheads = TokenSet::new();
-        eof_lookaheads.insert(Symbol::End);
-        let mut stack = Vec::new();
+        let mut eof_set = TokenSet::new();
+        eof_set.insert(Symbol::End);
+        let eof_lookaheads = result.lookaheads.intern(eof_set);
+        let mut stack: Vec<(usize, LookaheadSetId, ReservedWordSetId, bool)> = Vec::new();
         let mut follow_set_info_by_non_terminal = FxHashMap::<usize, FollowSetInfo>::default();
         let mut additions = vec![Vec::new(); syntax_grammar.variables.len()];
         let mut addition_indices = HashTable::new();
@@ -416,14 +531,19 @@ impl<'a> ParseItemSetBuilder<'a> {
             // appear at the beginning of non-terminal `i`, and whose values store
             // information about the tokens that can follow those non-terminals.
             stack.clear();
-            stack.push((i, &empty_lookaheads, ReservedWordSetId::default(), true));
+            stack.push((
+                i,
+                LookaheadSetPool::EMPTY,
+                ReservedWordSetId::default(),
+                true,
+            ));
             follow_set_info_by_non_terminal.clear();
             while let Some((sym_ix, lookaheads, reserved_word_set_id, propagates_lookaheads)) =
                 stack.pop()
             {
                 let mut did_add = false;
                 let info = follow_set_info_by_non_terminal.entry(sym_ix).or_default();
-                did_add |= info.lookaheads.insert_all(lookaheads);
+                did_add |= info.lookaheads.insert_all(result.lookaheads.get(lookaheads));
                 if reserved_word_set_id > info.reserved_lookaheads {
                     info.reserved_lookaheads = reserved_word_set_id;
                     did_add = true;
@@ -441,27 +561,19 @@ impl<'a> ParseItemSetBuilder<'a> {
                         .and_then(Symbol::non_terminal_index)
                     {
                         let index = usize::from(index);
-                        if let Some(next_step) = production.steps.get(1) {
+                        // What follows the first symbol of this production: either
+                        // the rest of the production, or — when the rest can be
+                        // empty — whatever follows the production itself.
+                        let suffix = result.step_suffixes[prod_id as usize][1];
+                        if suffix.nullable {
                             stack.push((
                                 index,
-                                &result.first_sets[&next_step.symbol()],
-                                result.reserved_first_sets[&next_step.symbol()],
-                                false,
-                            ));
-                        } else if production.requires_eof_lookahead {
-                            stack.push((
-                                index,
-                                &eof_lookaheads,
-                                ReservedWordSetId::default(),
-                                false,
-                            ));
-                        } else {
-                            stack.push((
-                                index,
-                                lookaheads,
-                                reserved_word_set_id,
+                                result.lookaheads.union(suffix.first, lookaheads),
+                                suffix.reserved.max(reserved_word_set_id),
                                 propagates_lookaheads,
                             ));
+                        } else {
+                            stack.push((index, suffix.first, suffix.reserved, false));
                         }
                     }
                 }
@@ -497,7 +609,7 @@ impl<'a> ParseItemSetBuilder<'a> {
                             let mut item_info = info;
                             if syntax_grammar.production(id).requires_eof_lookahead {
                                 item_info.lookaheads =
-                                    result.lookaheads.intern_ref(&eof_lookaheads);
+                                    eof_lookaheads;
                                 item_info.reserved_lookaheads = ReservedWordSetId::default();
                                 item_info.propagates_lookaheads = false;
                                 item_info.contains_word = false;
@@ -514,7 +626,7 @@ impl<'a> ParseItemSetBuilder<'a> {
                     } else {
                         let mut item_info = info;
                         if syntax_grammar.production(prod_id).requires_eof_lookahead {
-                            item_info.lookaheads = result.lookaheads.intern_ref(&eof_lookaheads);
+                            item_info.lookaheads = eof_lookaheads;
                             item_info.reserved_lookaheads = ReservedWordSetId::default();
                             item_info.propagates_lookaheads = false;
                             item_info.contains_word = false;
@@ -602,14 +714,28 @@ impl<'a> ParseItemSetBuilder<'a> {
             .step(self.syntax_grammar)
             .and_then(ProductionStep::non_terminal_index)
         {
-            let next_step = entry.item.successor().step(self.syntax_grammar);
-
-            // Determine which tokens can follow this non-terminal.
-            let (following_tokens, following_reserved_tokens) = if let Some(next_step) = next_step {
-                let key = next_step.symbol();
-                (self.first_set_ids[&key], self.reserved_first_sets[&key])
+            // Determine which tokens can follow this non-terminal: the FIRST set
+            // of the rest of the production, running past nullable steps, plus
+            // this item's own lookaheads when the rest can be empty.
+            let suffix = if entry.item.is_augmented() {
+                // The augmented start item has no real production; what follows
+                // it is whatever was given as its lookahead.
+                SuffixInfo {
+                    first: LookaheadSetPool::EMPTY,
+                    reserved: ReservedWordSetId::default(),
+                    nullable: true,
+                }
             } else {
-                (entry.lookaheads, entry.following_reserved_word_set)
+                self.step_suffixes[entry.item.prod_id as usize]
+                    [entry.item.step_index as usize + 1]
+            };
+            let (following_tokens, following_reserved_tokens) = if suffix.nullable {
+                (
+                    self.lookaheads.union(suffix.first, entry.lookaheads),
+                    suffix.reserved.max(entry.following_reserved_word_set),
+                )
+            } else {
+                (suffix.first, suffix.reserved)
             };
 
             // Use the pre-computed *additions* to expand the non-terminal.
