@@ -140,8 +140,9 @@ impl InputGrammar {
     ///
     /// A variable is "used" if it is the start rule, the word token, named in
     /// `extras`/`externals`, or transitively reachable via rule references from
-    /// any of the above.
-    fn normalize(mut self) -> Self {
+    /// any of the above. Each variable that is dropped is reported, because the
+    /// parser would otherwise accept less than the grammar says without a word.
+    fn normalize(mut self, diagnostics: &mut Vec<Diagnostic>) -> Self {
         // Compute the used set via forward DFS from the implicit roots
         // (start rule, word_token, refs in extras and externals).
         //
@@ -190,6 +191,12 @@ impl InputGrammar {
             .collect();
         self.variables.retain(|v| used.contains(&v.name));
         for &name in &dropped {
+            // The rule disappears below, so say so: a grammar author who lost a
+            // rule reference would otherwise get a parser that accepts less than
+            // the grammar says, with no hint as to why.
+            diagnostics.push(Diagnostic::UnreachableRule {
+                name: self.pool.resolve(name).into(),
+            });
             self.conflict_names.retain(|c| !c.contains(&name));
             self.supertype_names.retain(|&s| s != name);
             self.inline_names.retain(|&s| s != name);
@@ -312,7 +319,7 @@ pub(crate) fn parse_grammar(
         word_name,
         precedence_orderings,
     }
-    .normalize();
+    .normalize(diagnostics);
     Ok(grammar)
 }
 

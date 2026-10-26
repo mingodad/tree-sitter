@@ -284,6 +284,8 @@ pub enum Diagnostic {
     UnarySeq { name: Option<Box<str>> },
     UnsupportedRegexFlag { flag: char, pattern: Box<str> },
     SupertypeInlined { name: Box<str> },
+    UnreachableRule { name: Box<str> },
+    UnproductiveRule { name: Box<str> },
 }
 
 impl std::fmt::Display for Diagnostic {
@@ -325,6 +327,19 @@ impl std::fmt::Display for Diagnostic {
                 write!(
                     f,
                     "rule `{name}` is both a supertype and inlined. the supertype is ignored."
+                )?;
+            }
+            Self::UnreachableRule { name } => {
+                write!(
+                    f,
+                    "rule `{name}` is not reachable from the start rule. it was ignored."
+                )?;
+            }
+            Self::UnproductiveRule { name } => {
+                write!(
+                    f,
+                    "rule `{name}` cannot match anything: every production of it needs a rule \
+                     or token that can never match. the parser will never accept it."
                 )?;
             }
         }
@@ -896,6 +911,86 @@ mod tests {
             &mut Vec::new(),
         )
         .unwrap();
+    }
+
+    /// The diagnostics a grammar produces, as `(kind, rule name)` pairs.
+    fn diagnostics_of(grammar_json: &str) -> Vec<(&'static str, String)> {
+        let mut diagnostics = Vec::new();
+        super::generate_parser_for_grammar(
+            grammar_json,
+            None,
+            super::OptLevel::default(),
+            &mut diagnostics,
+        )
+        .unwrap();
+        diagnostics
+            .iter()
+            .map(|d| match d {
+                super::Diagnostic::UnreachableRule { name } => ("unreachable", name.to_string()),
+                super::Diagnostic::UnproductiveRule { name } => ("unproductive", name.to_string()),
+                other => ("other", other.to_string()),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_a_rule_that_nothing_reaches_is_reported() {
+        // `orphan` is dropped before table construction, so without this warning
+        // the grammar generates a parser that silently ignores it.
+        let diagnostics = diagnostics_of(
+            r#"{
+                "name": "unreachable_rule",
+                "rules": {
+                    "source_file": {"type": "SYMBOL", "name": "a"},
+                    "a": {"type": "STRING", "value": "a"},
+                    "orphan": {"type": "STRING", "value": "o"}
+                }
+            }"#,
+        );
+        assert_eq!(diagnostics, [("unreachable", "orphan".to_string())]);
+    }
+
+    #[test]
+    fn test_a_rule_that_derives_nothing_is_reported() {
+        // `a: a ok` has no base case, so no state can ever reduce to `a`. Bison
+        // calls this "nonterminal useless in grammar"; tree-sitter used to build
+        // a parser in which the rule simply never matched.
+        let diagnostics = diagnostics_of(
+            r#"{
+                "name": "unproductive_rule",
+                "rules": {
+                    "source_file": {"type": "CHOICE", "members": [
+                        {"type": "SYMBOL", "name": "a"},
+                        {"type": "STRING", "value": "ok"}
+                    ]},
+                    "a": {"type": "SEQ", "members": [
+                        {"type": "SYMBOL", "name": "a"},
+                        {"type": "STRING", "value": "ok"}
+                    ]}
+                }
+            }"#,
+        );
+        assert_eq!(diagnostics, [("unproductive", "a".to_string())]);
+    }
+
+    #[test]
+    fn test_a_healthy_grammar_has_no_unreachable_or_unproductive_diagnostics() {
+        let diagnostics = diagnostics_of(
+            r#"{
+                "name": "healthy",
+                "rules": {
+                    "source_file": {"type": "REPEAT", "content": {"type": "SYMBOL", "name": "item"}},
+                    "item": {"type": "CHOICE", "members": [
+                        {"type": "STRING", "value": "a"},
+                        {"type": "SEQ", "members": [
+                            {"type": "SYMBOL", "name": "item"},
+                            {"type": "STRING", "value": "b"}
+                        ]}
+                    ]}
+                }
+            }"#,
+        );
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
     }
 
     #[test]
