@@ -121,6 +121,15 @@ struct Generate {
     /// nothing: compare digests, not grammar.json text.
     #[arg(long)]
     pub stamp: bool,
+    /// Write the grammar the parse table is built from, as BNF, then exit.
+    ///
+    /// This is the grammar *after* EBNF lowering: every `repeat`/`repeat1`
+    /// became an auxiliary rule named `{rule}_repeat{N}`, and precedence lives
+    /// on production steps rather than on symbols. Use it to see the
+    /// productions behind a conflict the table builder reports. `-` writes to
+    /// stdout.
+    #[arg(long, value_name = "PATH")]
+    pub dump_expanded: Option<PathBuf>,
     /// Deprecated: use the `build` command
     #[arg(long, short = 'b')]
     pub build: bool,
@@ -1015,6 +1024,38 @@ impl Generate {
         } else {
             self.json_summary
         };
+
+        if let Some(path) = &self.dump_expanded {
+            let grammar_path = self
+                .grammar_path
+                .clone()
+                .unwrap_or_else(|| current_dir.join("grammar.js"));
+            let grammar_json =
+                tree_sitter_generate::load_grammar_file(&grammar_path, self.js_runtime.as_deref())?;
+            let mut diagnostics = Vec::new();
+            let result = if path.as_os_str() == "-" {
+                let stdout = std::io::stdout();
+                let mut stdout = stdout.lock();
+                tree_sitter_generate::write_expanded_grammar(
+                    &grammar_json,
+                    &mut stdout,
+                    &mut diagnostics,
+                )
+            } else {
+                let file = std::fs::File::create(path)?;
+                let mut file = std::io::BufWriter::new(file);
+                tree_sitter_generate::write_expanded_grammar(
+                    &grammar_json,
+                    &mut file,
+                    &mut diagnostics,
+                )
+            };
+            result.with_context(|| "Error when dumping the expanded grammar")?;
+            for d in &diagnostics {
+                warn!("{d}");
+            }
+            return Ok(());
+        }
 
         let mut diagnostics = Vec::new();
         let result = tree_sitter_generate::generate_parser_in_directory(

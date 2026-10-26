@@ -736,9 +736,14 @@ bison-flex.g          metagrammar for the joined Bison/Flex `.g` format
 postgres16.g          Postgres stress grammar (705 rules)
 bison_flex/           tree-sitter grammar for `.g`, check.sh, extract.py, README
 bin/tree-sitter       prebuilt CLI, 8.4 MB: release+stripped build of
-                      /Volumes/RamDisk/tree-sitter at patches 0001-0009
-                      (NOT stock: it has --lalr, --max-states,
-                      --report-states-for-rule, --report-lex-states)
+                      /Volumes/RamDisk/tree-sitter at patches 0001-0011 plus
+                      the repo's `wip` commits (NOT stock: it has --lalr,
+                      --max-states, --report-states-for-rule,
+                      --report-lex-states, --stamp).  It predates
+                      --dump-expanded; for that flag build
+                      `cargo build --no-default-features -p tree-sitter-cli`
+                      (default features pull rquickjs/bindgen, which do not fit
+                      on the ramdisk).
 target/ .diff/ .e2e/ .roundtrip/ .self/    build output and scratch, gitignored
 ```
 

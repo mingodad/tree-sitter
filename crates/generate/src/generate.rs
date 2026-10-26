@@ -19,6 +19,7 @@ use thiserror::Error;
 mod bitvec;
 mod build_tables;
 mod dedup;
+mod dump_grammar;
 mod grammars;
 mod nfa;
 mod node_types;
@@ -33,6 +34,7 @@ mod tables;
 
 use build_tables::build_tables;
 pub use build_tables::{AmbiguousExtraError, ConflictError, ParseTableBuilderError};
+pub use dump_grammar::write_expanded_grammar;
 use grammars::{InlinedProductionMap, LexicalGrammar, SyntaxGrammar};
 pub use node_types::{InvalidSupertypeError, SuperTypeCycleError, VariableInfoError};
 pub use parse_grammar::ParseGrammarError;
