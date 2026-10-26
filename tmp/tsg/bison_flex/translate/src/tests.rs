@@ -282,6 +282,28 @@ fn a_flex_hex_escape_becomes_one_regex_byte() {
 }
 
 #[test]
+fn a_flex_octal_escape_reads_all_three_digits() {
+    // `\377` is octal 255, the top of PostgreSQL's `[A-Za-z\200-\377_]`.
+    // The scan that collects the digits compared them against `b'0'..b'7'`, an
+    // exclusive range, so any escape containing a 7 stopped early: `\377`
+    // became `\x03` followed by the literal characters `77`, which is both the
+    // wrong character and an unbraced four-digit `\x0377` that the regex
+    // dialect refuses.
+    let text = translate(&source(
+        "%token ID",
+        "s : ID ;",
+        r"[\200-\377_]    ID",
+    ));
+    assert!(text.contains(r"ID: /[\x{80}-\x{ff}_]/;"), "{text}");
+}
+
+#[test]
+fn a_flex_octal_escape_reads_one_to_three_digits() {
+    let text = translate(&source("%token ID", "s : ID ;", r"[\7\17\177]    ID"));
+    assert!(text.contains(r"ID: /[\x07\x0f\x7f]/;"), "{text}");
+}
+
+#[test]
 fn a_rule_whose_productions_all_needed_an_unlexable_token_does_not_become_empty() {
     // `%token LOST` has no lexer rule, so `b` loses its only production. `b`
     // is then unproductive, not nullable: a `b?` here would say the language

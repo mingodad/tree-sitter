@@ -65,7 +65,7 @@ pub fn to_regex(pattern: &str) -> Result<String, String> {
             let next = bytes[index + 1];
             if next.is_ascii_digit() && next < b'8' {
                 let mut end = index + 1;
-                while end < bytes.len() && end < index + 4 && (b'0'..b'7').contains(&bytes[end]) {
+                while end < bytes.len() && end < index + 4 && (b'0'..=b'7').contains(&bytes[end]) {
                     end += 1;
                 }
                 let digits = &pattern[index + 1..end];
