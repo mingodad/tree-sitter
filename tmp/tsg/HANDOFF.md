@@ -778,20 +778,30 @@ flag experiments, §6 reverse direction, §7 deliberate omissions).
 ## Toolchain provenance, and the definition of green
 
 Every gate script defaults to `ts=${TS:-$here/bin/tree-sitter}` and
-`tsg=$here/target/debug/tsg`.  `bin/tree-sitter` is **the patched CLI** (release,
-stripped, 8.4 MB) built from `/Volumes/RamDisk/tree-sitter` at patches
-`0001`-`0009`; it is not stock 0.28.0.  Consequence: `postgres16/check.sh` and
+`tsg=$here/target/debug/tsg`.  That split is deliberate: the gates want the
+binary cargo just built from the working tree, while `bin/` holds the tools you
+*install once* — hence `./install.sh` builds `bin/tsg` (release, ~1.0 MB) and
+writes `bin/VERSIONS` with the commit it came from, so a stale copy in `bin/`
+can be dated instead of silently drifting.
+
+`bin/tsg` also matters beyond convenience: the patched generator runs `.tsg`
+files by invoking a `tsg` on `PATH` (or `TREE_SITTER_TSG`), so
+`export PATH=$here/bin:$PATH` is what makes `tree-sitter generate grammar.tsg`
+work with no path in `target/` and no intermediate JSON.
+
+`bin/tree-sitter` is **the patched CLI** (release, stripped, 8.5 MB) built from
+`/Volumes/RamDisk/tree-sitter` at patches `0001`-`0011`; it is not stock 0.28.0.  Consequence: `postgres16/check.sh` and
 `bc/` need `--lalr`/`--max-states` and **cannot** run on a stock CLI, so do not
 "just download a release binary" and expect the gates to pass.  Rebuild recipe
-(fits in the sandbox, ~2 min, 408 MB while it lasts):
+(build **off** the ramdisk: the CLI's debug profile is ~550 MB and does not fit;
+a stripped release build is 27 s):
 
 ```
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 cd /Volumes/RamDisk/tree-sitter
-CARGO_TARGET_DIR=tmp/tsg/.tsbuild CARGO_INCREMENTAL=0 \
+CARGO_TARGET_DIR=$HOME/.ts-build CARGO_INCREMENTAL=0 \
   CARGO_PROFILE_RELEASE_STRIP=true cargo build --release --offline -p tree-sitter-cli
-cp tmp/tsg/.tsbuild/release/tree-sitter tmp/tsg/bin/tree-sitter
-rm -rf tmp/tsg/.tsbuild
+cp $HOME/.ts-build/release/tree-sitter tmp/tsg/bin/tree-sitter
 ```
 
 **What is deliberately *not* in `bin/`: `tsg` itself.**  The gates call
