@@ -12,6 +12,15 @@ use crate::{
     rules::{Precedence, Rule, RuleId, RulePool, Symbol},
 };
 
+/// The states that `expand_rule` created for one token's body: the `Accept` state, the body
+/// states that follow it, and whether the token is `@immediate` (in which case separators
+/// cannot precede it).
+struct Range {
+    accept: u32,
+    body_start: u32,
+    is_immediate: bool,
+}
+
 struct NfaBuilder {
     nfa: Nfa,
     is_sep: bool,
@@ -85,6 +94,8 @@ pub fn expand_tokens(
     };
     let separator_root = build_separator(pool, separator_roots);
 
+    let mut ranges = Vec::with_capacity(lexical_variables.len());
+
     let mut variables = Vec::with_capacity(lexical_variables.len());
     for (i, variable) in lexical_variables.iter().enumerate() {
         if pool.subtree_matches_empty_str(variable.root) {
@@ -98,6 +109,7 @@ pub fn expand_tokens(
         };
 
         builder.is_sep = false;
+        let accept = builder.nfa.states.len() as u32;
         builder.nfa.states.push(NfaState::Accept {
             variable_index: i,
             precedence: get_completion_precedence(pool, variable.root),
@@ -111,6 +123,13 @@ pub fn expand_tokens(
                     error: e,
                 })
             })?;
+
+        let body_start = builder.nfa.last_state_id();
+        ranges.push(Range {
+            accept,
+            body_start,
+            is_immediate: is_immediate_token,
+        });
 
         if !is_immediate_token {
             builder.is_sep = true;
@@ -128,10 +147,120 @@ pub fn expand_tokens(
         });
     }
 
+    let (shared_nfa, shared_owner, shared_start) = build_shared_nfa(
+        &builder.nfa,
+        &ranges,
+        &variables,
+        !separator_roots.is_empty(),
+    );
+
     Ok(LexicalGrammar {
         nfa: builder.nfa,
         variables,
+        shared_nfa,
+        shared_owner,
+        shared_start,
     })
+}
+
+/// Build an NFA that is equivalent to `nfa`, but where the separator rules are expanded only
+/// once: every token body is a private subgraph, and the single shared copy of the separator
+/// rules exits into a hub that splits over every (non-immediate) token body.
+///
+/// `sep* a | sep* b` is the same language as `sep* (a | b)`, so filtering the state sets to
+/// the tokens valid in a parse state gives exactly the same lex table as the per-token
+/// copies in `nfa`, but with state sets that are proportional to the number of *live*
+/// tokens instead of the total number of tokens.
+fn build_shared_nfa(
+    nfa: &Nfa,
+    ranges: &[Range],
+    variables: &[LexicalVariable],
+    has_separators: bool,
+) -> (Nfa, Vec<u32>, Vec<u32>) {
+    /// The owner of a state that belongs to the shared separator block or the hub.
+    const SHARED: u32 = u32::MAX;
+
+    let mut shared = Nfa::default();
+    let mut owner = Vec::<u32>::with_capacity(nfa.states.len());
+    let mut body_start = Vec::with_capacity(ranges.len());
+    let mut start = Vec::with_capacity(ranges.len());
+
+    // Copy each token's private body, renumbering its states to be contiguous.
+    for (i, range) in ranges.iter().enumerate() {
+        let new_accept = shared.states.len() as u32;
+        shared
+            .states
+            .push(nfa.states[range.accept as usize].clone());
+        owner.push(i as u32);
+        for id in (range.accept + 1)..=range.body_start {
+            let remap = |target: u32| target - range.accept + new_accept;
+            shared
+                .states
+                .push(nfa.states[id as usize].clone_with_targets(remap));
+            owner.push(i as u32);
+        }
+        body_start.push(new_accept + (range.body_start - range.accept));
+        start.push(body_start[i]);
+    }
+
+    if has_separators && let Some(first) = ranges.iter().position(|r| !r.is_immediate) {
+        // A binary split tree over every non-immediate token body: the exit of the shared
+        // separator block. Its leaves are the bodies themselves; the lex table builder drops
+        // the ones that belong to tokens which are not valid in the current parse state.
+        let mut level = (0..ranges.len())
+            .filter(|&i| !ranges[i].is_immediate)
+            .map(|i| body_start[i])
+            .collect::<Vec<_>>();
+        while level.len() > 1 {
+            let mut next = Vec::with_capacity(level.len().div_ceil(2));
+            for pair in level.chunks(2) {
+                let id = shared.states.len() as u32;
+                let right = pair.get(1).copied().unwrap_or(pair[0]);
+                shared.states.push(NfaState::Split(pair[0], right));
+                owner.push(SHARED);
+                next.push(id);
+            }
+            level = next;
+        }
+        let hub = level[0];
+
+        // Every non-immediate token's copy of the separators has the same shape, so one
+        // shared copy can serve them all.
+        debug_assert!(ranges.iter().enumerate().all(|(i, r)| {
+            r.is_immediate
+                || variables[i].start_state.wrapping_sub(r.body_start + 1)
+                    == variables[first]
+                        .start_state
+                        .wrapping_sub(ranges[first].body_start + 1)
+        }));
+
+        // Copy the separator block once, redirecting its exits to the hub.
+        let block_start = ranges[first].body_start + 1;
+        let block_end = variables[first].start_state;
+        let new_block_start = shared.states.len() as u32;
+        for id in block_start..=block_end {
+            let remap = |target: u32| {
+                if (block_start..=block_end).contains(&target) {
+                    target - block_start + new_block_start
+                } else {
+                    hub
+                }
+            };
+            shared
+                .states
+                .push(nfa.states[id as usize].clone_with_targets(remap));
+            owner.push(SHARED);
+        }
+        let separator_start = new_block_start + (block_end - block_start);
+
+        for (i, range) in ranges.iter().enumerate() {
+            if !range.is_immediate {
+                start[i] = separator_start;
+            }
+        }
+    }
+
+    (shared, owner, start)
 }
 
 fn build_separator(pool: &mut RulePool, separator_roots: &[RuleId]) -> RuleId {
@@ -495,9 +624,48 @@ mod tests {
         nfa::{NfaCursor, NfaTransition},
     };
 
+    fn retain_allowed(cursor: &mut NfaCursor<'_>, allowed: Option<&[bool]>) {
+        if let Some(allowed) = allowed {
+            cursor
+                .state_ids
+                .retain(|&state_id| allowed[state_id as usize]);
+        }
+    }
+
     fn simulate_nfa<'a>(grammar: &'a LexicalGrammar, s: &'a str) -> Option<(usize, &'a str)> {
         let start_states = grammar.variables.iter().map(|v| v.start_state).collect();
-        let mut cursor = NfaCursor::new(&grammar.nfa, start_states);
+        simulate(&grammar.nfa, start_states, s, None)
+    }
+
+    /// The same simulation over the `shared_nfa`, with the state set restricted to `tokens`
+    /// and the shared separator block, the way the lex table builder does it. Returns the
+    /// index of the token that matched instead of the id of its accept state.
+    fn simulate_shared<'a>(
+        grammar: &'a LexicalGrammar,
+        tokens: &[usize],
+        s: &'a str,
+    ) -> Option<(usize, &'a str)> {
+        let allowed = grammar
+            .shared_owner
+            .iter()
+            .map(|&owner| owner == u32::MAX || tokens.contains(&(owner as usize)))
+            .collect::<Vec<_>>();
+        simulate(
+            &grammar.shared_nfa,
+            grammar.shared_start.clone(),
+            s,
+            Some(&allowed),
+        )
+    }
+
+    fn simulate<'a>(
+        nfa: &'a Nfa,
+        start_states: Vec<u32>,
+        s: &'a str,
+        allowed: Option<&[bool]>,
+    ) -> Option<(usize, &'a str)> {
+        let mut cursor = NfaCursor::new(nfa, start_states);
+        retain_allowed(&mut cursor, allowed);
 
         let mut result = None;
         let mut result_precedence = i32::MIN;
@@ -520,6 +688,7 @@ mod tests {
                 .find(|t| t.characters.contains(c) && t.precedence >= result_precedence)
             {
                 cursor.reset(states);
+                retain_allowed(&mut cursor, allowed);
                 end_char += c.len_utf8();
                 if is_separator {
                     start_char = end_char;
@@ -558,6 +727,24 @@ mod tests {
         let grammar = expand_tokens(&mut pool, &vars, &separators).unwrap();
         for &(input, expected) in examples {
             assert_eq!(simulate_nfa(&grammar, input), expected, "input {input}");
+
+            // The shared NFA, restricted to the token that won above, must match the same
+            // text; with every token allowed it must still reject a non-match.
+            match expected {
+                Some((index, text)) => assert_eq!(
+                    simulate_shared(&grammar, &[index], input),
+                    Some((index, text)),
+                    "shared_nfa input {input}"
+                ),
+                None => {
+                    let all = (0..grammar.variables.len()).collect::<Vec<_>>();
+                    assert_eq!(
+                        simulate_shared(&grammar, &all, input),
+                        None,
+                        "shared_nfa input {input}"
+                    );
+                }
+            }
         }
     }
 
@@ -1168,6 +1355,80 @@ mod tests {
                 ("567", None),
             ],
         );
+    }
+
+    #[test]
+    fn test_separators_are_expanded_once() {
+        //   tok0: 'a',  tok1: 'b',  tok2: 'c',  separator: ' '
+        // The per-token copies each carry their own copy of the separator; the shared NFA
+        // carries one, and every token that can be preceded by a separator starts there.
+        let mut pool = RulePool::default();
+        let (a, b, c, space) = (
+            pool.intern("a"),
+            pool.intern("b"),
+            pool.intern("c"),
+            pool.intern(" "),
+        );
+        let roots = [a, b, c].map(|s| pool.string(s)).to_vec();
+        let separators = vec![pool.string(space)];
+        let vars = roots
+            .into_iter()
+            .enumerate()
+            .map(|(i, root)| LexicalToken {
+                name: pool.intern(&format!("tok{i}")),
+                kind: VariableType::Anonymous,
+                root,
+            })
+            .collect::<Vec<_>>();
+        let grammar = expand_tokens(&mut pool, &vars, &separators).unwrap();
+
+        let shared_start = grammar.shared_start.clone();
+        assert_eq!(shared_start[0], shared_start[1]);
+        assert_eq!(shared_start[0], shared_start[2]);
+        assert_eq!(grammar.shared_owner[shared_start[0] as usize], u32::MAX);
+
+        // Three token bodies plus one separator block, instead of three copies of it.
+        assert!(grammar.shared_nfa.states.len() < grammar.nfa.states.len());
+
+        for &(input, expected) in &[
+            ("a", Some((0, "a"))),
+            ("  b", Some((1, "b"))),
+            ("   c", None),
+            ("  c", Some((2, "c"))),
+        ] {
+            assert_eq!(
+                simulate_shared(&grammar, &[expected.map_or(0, |(i, _)| i)], input),
+                expected,
+                "input {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_shared_nfa_has_no_separators_without_extras() {
+        // With no extras there is nothing to share.
+        let mut pool = RulePool::default();
+        let roots = ["x", "y"]
+            .map(|s| {
+                let s = pool.intern(s);
+                pool.string(s)
+            })
+            .to_vec();
+        let vars = roots
+            .into_iter()
+            .enumerate()
+            .map(|(i, root)| LexicalToken {
+                name: pool.intern(&format!("tok{i}")),
+                kind: VariableType::Anonymous,
+                root,
+            })
+            .collect::<Vec<_>>();
+        let grammar = expand_tokens(&mut pool, &vars, &[]).unwrap();
+        // With no extras there is no shared prefix: each token starts in its own body.
+        assert_eq!(grammar.shared_start.len(), 2);
+        assert_ne!(grammar.shared_start[0], grammar.shared_start[1]);
+        assert_eq!(simulate_shared(&grammar, &[1], "y"), Some((1, "y")));
+        assert_eq!(simulate_shared(&grammar, &[0, 1], " z"), None);
     }
 
     #[test]

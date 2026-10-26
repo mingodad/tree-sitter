@@ -69,6 +69,24 @@ pub struct LexicalVariable {
 pub struct LexicalGrammar {
     pub nfa: Nfa,
     pub variables: Vec<LexicalVariable>,
+    /// An NFA equivalent to `nfa`, but with the separator rules expanded only *once*
+    /// instead of once per token. Expanding the separators per token multiplies the size of
+    /// every live state set in the lex-table builder by the number of tokens, which makes
+    /// grammars with many tokens (and a few extras) take minutes to build.
+    ///
+    /// In this NFA, each token's *body* is a private subgraph, and all separators live in a
+    /// single shared subgraph whose exit is a hub that splits over every token body. Since
+    /// `sep* t0 | sep* t1 | ...` is the same language as `sep* (t0 | t1 | ...)`, the lex
+    /// table is identical as long as every state set is filtered to the tokens that are
+    /// valid in the parse state being processed (see [`Self::shared_owner`]).
+    pub shared_nfa: Nfa,
+    /// For each state of `shared_nfa`, the index of the token that owns it, or `u32::MAX`
+    /// for the shared separator and hub states.
+    pub shared_owner: Vec<u32>,
+    /// For each variable, the entry state to use when lexing with `shared_nfa`. For a normal
+    /// token this is the shared separator block; for an `@immediate` token it is the token's
+    /// own body, since separators cannot precede those.
+    pub shared_start: Vec<u32>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
