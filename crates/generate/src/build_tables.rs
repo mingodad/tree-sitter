@@ -27,7 +27,7 @@ use self::{
     token_conflicts::TokenConflictMap,
 };
 use crate::{
-    Diagnostic, OptLevel,
+    Diagnostic, OptLevel, ShadowedExtra,
     grammars::{InlinedProductionMap, LexicalGrammar, SyntaxGrammar},
     nfa::{CharacterSet, NfaCursor},
     node_types::VariableInfo,
@@ -216,6 +216,13 @@ pub fn build_tables(
         str_pool,
     );
     stage!("build_lex_table");
+    report_shadowed_extras(
+        syntax_grammar,
+        lexical_grammar,
+        str_pool,
+        &lex_tables.report,
+        diagnostics,
+    );
     populate_external_lex_states(&mut parse_table, syntax_grammar);
     mark_fragile_tokens(&mut parse_table, &token_conflict_map);
     stage!("fragile_tokens");
@@ -870,6 +877,51 @@ fn plural(count: usize, noun: &str) -> String {
         format!("1 {noun}")
     } else {
         format!("{count} {noun}s")
+    }
+}
+
+/// Warn where a token completes on the first character of an extra.
+///
+/// This is nearly always a bug rather than a quirk: the extra can then only be lexed
+/// where no such token is valid, so `1 /* c */` lexes `/` as division whenever `Slash`
+/// is a token of the language. The report shows it (`0009`), but a report has to be
+/// asked for, and an author who does not already suspect the cause will not ask.
+///
+/// Deduplicated per (token, characters, extras), because one shadow occurs in every lex
+/// state whose token set contains the token, and capped, so a grammar with many
+/// prefixes does not drown the other warnings.
+fn report_shadowed_extras(
+    syntax_grammar: &SyntaxGrammar,
+    lexical_grammar: &LexicalGrammar,
+    str_pool: &StrPool,
+    report: &LexReport,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    const MAX: usize = 10;
+    let names = LexNames {
+        syntax_grammar,
+        lexical_grammar,
+        str_pool,
+    };
+    let rows = report
+        .states
+        .iter()
+        .flat_map(|state| state.shadows.iter())
+        .filter(|shadow| shadow.pruned_is_separator)
+        .map(|shadow| ShadowedExtra {
+            token: names.name(shadow.completed).into_boxed_str(),
+            characters: describe_characters(&shadow.characters).into_boxed_str(),
+            extras: shadow
+                .pruned_extras
+                .iter()
+                .map(|&symbol| names.name(symbol).into_boxed_str())
+                .collect(),
+        })
+        .collect::<BTreeSet<_>>();
+    if !rows.is_empty() {
+        diagnostics.push(Diagnostic::ShadowedExtras(
+            rows.into_iter().take(MAX).collect(),
+        ));
     }
 }
 

@@ -1,3 +1,4 @@
+use log::warn;
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -11,7 +12,7 @@ use crate::{
 };
 
 #[derive(Deserialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", deny_unknown_fields)]
 #[expect(
     non_camel_case_types,
     reason = "variant names match JSON grammar format"
@@ -90,6 +91,7 @@ enum PrecedenceValueJSON {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GrammarJSON {
     pub name: String,
     rules: Map<String, Value>,
@@ -109,6 +111,14 @@ pub struct GrammarJSON {
     word: Option<String>,
     #[serde(default)]
     reserved: Map<String, Value>,
+    /// A JSON schema reference written by tooling. Past it, nothing in the file's
+    /// meaning, but `deny_unknown_fields` would reject every file that carries it.
+    #[serde(rename = "$schema", default)]
+    _schema: Option<Value>,
+    /// The JS DSL merges an inherited grammar before generating; the generator
+    /// itself cannot, so a file that still says it is generating a partial grammar.
+    #[serde(default)]
+    inherits: Option<Value>,
 }
 
 pub type ParseGrammarResult<T> = Result<T, ParseGrammarError>;
@@ -227,6 +237,11 @@ pub(crate) fn parse_grammar(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> ParseGrammarResult<InputGrammar> {
     let grammar_json = serde_json::from_str::<GrammarJSON>(input)?;
+    if let Some(inherits) = &grammar_json.inherits {
+        warn!(
+            "this grammar inherits `{inherits}`, which the generator does not merge:              generate it with the JS DSL, or inline the inherited rules into `rules`"
+        );
+    }
     let mut pool = RulePool::default();
 
     let extra_roots =

@@ -286,11 +286,55 @@ pub enum Diagnostic {
     SupertypeInlined { name: Box<str> },
     UnreachableRule { name: Box<str> },
     UnproductiveRule { name: Box<str> },
+    ShadowedExtras(Box<[ShadowedExtra]>),
+}
+
+/// A token that completes where an extra begins, so the extra is never lexed there.
+///
+/// Where a token completes, the lexer table cannot keep a separator transition: at
+/// equal matched length a token beats an extra, and that is not configurable. For a
+/// comment extra this shows up as `1 /* c */` lexing the `/` as division.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ShadowedExtra {
+    pub token: Box<str>,
+    pub characters: Box<str>,
+    /// The extras the dropped transition belonged to, when they have names.
+    pub extras: Box<[Box<str>]>,
 }
 
 impl std::fmt::Display for Diagnostic {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::ShadowedExtras(rows) => {
+                writeln!(
+                    f,
+                    "a token that completes at the start of an extra hides that extra:",
+                )?;
+                for ShadowedExtra {
+                    token,
+                    characters,
+                    extras,
+                } in rows.iter()
+                {
+                    write!(
+                        f,
+                        "  `{token}` completes, so the transition on {characters} into "
+                    )?;
+                    if extras.is_empty() {
+                        writeln!(f, "an extra is never taken")?;
+                    } else {
+                        writeln!(f, "extra `{}` is never taken", extras.join("`, `"))?;
+                    }
+                }
+                if rows.len() >= 10 {
+                    writeln!(f, "  (only the first 10 are shown)")?;
+                }
+                write!(
+                    f,
+                    "  at equal length a token beats an extra: no token may be a prefix of an \
+                     extra that must win, so rename the token or change the extra",
+                )?;
+            }
             Self::UnnecessaryConflicts(conflicts) => {
                 writeln!(f, "unnecessary conflicts:")?;
                 for (i, conflict) in conflicts.iter().enumerate() {
