@@ -6,7 +6,9 @@
 #
 #   ./clean.sh                # scratch + generated parsers; keeps target/ bin/
 #   ./clean.sh --target       # also every cargo target/ tree (tsg ~150 M,
-#                             #   bison_flex/translate ~135 M); rebuilds are 2-30 s
+#                             #   bison_flex/translate ~135 M) and, when the parent
+#                             #   directory is the tree-sitter workspace, its
+#                             #   target/ (~475 M); rebuilds are 2-30 s
 #                             #   (see --binaries for the recipes)
 #   ./clean.sh --binaries     # also bin/ (patched tree-sitter, g2tsg)
 #   ./clean.sh --all          # both
@@ -63,6 +65,46 @@ prune() {
     freed=$((freed + size))
 }
 
+# The tree-sitter checkout that *contains* this one is a cargo workspace, and
+# building there without CARGO_TARGET_DIR writes ~475 M into its target/.  That
+# path is outside $root, so `prune` refuses it — which is why `--target` could
+# report a freed size while the ramdisk stayed full.  This checkout sits two
+# levels down (tmp/tsg), so search upward instead of assuming `..`, and only
+# remove a target/ whose parent is verifiably the tree-sitter workspace.
+workspace_root=
+workspace_up=
+for up in . .. ../..; do
+    cand=$(cd "$root/$up" 2>/dev/null && pwd -P) || continue
+    if grep -qx '\[workspace\]' "$cand/Cargo.toml" 2>/dev/null &&
+        grep -qx 'name = "tree-sitter-generate"' \
+            "$cand/crates/generate/Cargo.toml" 2>/dev/null; then
+        workspace_root=$cand
+        workspace_up=$up
+        break
+    fi
+done
+workspace_target=${workspace_root:+$workspace_root/target}
+
+prune_workspace_target() {
+    local size rel
+    if [ -z "$workspace_root" ]; then
+        # A stray target/ next to us is not ours to guess about.
+        echo "clean.sh: note: no tree-sitter workspace above $root; only local target/ trees are removed" >&2
+        return 0
+    fi
+    [ -e "$workspace_target" ] || return 0
+    if [ "$workspace_up" = . ]; then rel=target; else rel=$workspace_up/target; fi
+    size=$(du -sk "$workspace_target" 2>/dev/null | awk '{print $1}')
+    size=${size:-0}
+    if [ "$dry" = 1 ]; then
+        printf '  would remove %6s M  %s\n' "$((size / 1024))" "$rel"
+    else
+        rm -rf "$workspace_target"
+        printf '  removed       %6s M  %s\n' "$((size / 1024))" "$rel"
+    fi
+    freed=$((freed + size))
+}
+
 echo "clean.sh: $root"
 
 # 1. Scratch from the check scripts.  A parse log or a copied corpus is worth
@@ -97,8 +139,12 @@ while IFS= read -r f; do prune "$f"; done < <(find "$root" -maxdepth 3 -name '*.
 #    only `$root/target` used to leave that behind while reporting the space it
 #    did not free.  `-prune` stops `find` descending into a tree it will delete.
 if [ "$want_target" = 1 ]; then
-    while IFS= read -r d; do prune "$d"; done < <(find "$root" -maxdepth 4 \
+    while IFS= read -r d; do prune "$d"; done < <(find "$root" -maxdepth 6 \
         -name target -type d -prune 2>/dev/null | sort)
+    prune_workspace_target
+    if [ -n "${CARGO_TARGET_DIR:-}" ]; then
+        echo "clean.sh: note: builds go to CARGO_TARGET_DIR=$CARGO_TARGET_DIR (outside this script)" >&2
+    fi
 fi
 if [ "$want_binaries" = 1 ]; then
     prune "$root/bin"
