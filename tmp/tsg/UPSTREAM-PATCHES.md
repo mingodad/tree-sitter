@@ -100,3 +100,55 @@ using its stdout as the grammar. The generic form of it is 15 lines and is in
    readable.
 
 Everything else can wait for a reply.
+
+---
+
+## Branches prepared for review
+
+Two branches exist in `/Volumes/RamDisk/tree-sitter`; neither is pushed.
+
+**`tsg`** (`7ad35eb`, identical to `wip`) — everything: 55 commits, 842 files,
+196 of them under `tmp/`. This is what `./push-fork.sh` pushes as the new branch.
+Short version of what it contains is in `HANDOFF.md`.
+
+**`upstream`** (`f19579d`) — the 18 generator/CLI commits and nothing else:
+
+```
+$ git diff --stat 0fff6ab..upstream
+ 16 files changed, 2851 insertions(+), 188 deletions(-)
+$ git ls-tree -r --name-only upstream | grep -c '^tmp/'
+0
+```
+
+It was rebuilt from the import commit by applying each patch **restricted to
+`crates/` and `lib/`**, because two of the commits rode along with `tmp/`
+documentation edits (`0000f4d` also edited `ROADMAP.md`, which does not exist on
+that branch and made a plain `git cherry-pick` conflict). That is why the SHAs
+differ from `wip` and every message ends with
+`(cherry picked from commit <sha>, generator changes only)`.
+
+The `.tsg` seam (`ce61d7c`) is deliberately **not** in it — it is the only commit
+that needs `tsg`, and its generic form is `UPSTREAM.md` §8.
+
+`git grep tsg upstream -- crates` finds exactly one hit: a doc comment in the
+`--stamp` commit that names "a front end like `tsg`" as an example. Harmless; if
+it bothers a reviewer it is one `sed` and a rebase of six commits.
+
+**Review aids, already generated:**
+
+- `tmp/tsg/.review/00*.patch` — the 18 commits as `git format-patch` output
+  (248 KB), which is also the shape `git send-email` wants.
+- `UPSTREAM.md` — the findings, with what still needs reduction before filing.
+- `UPSTREAM-PATCHES.md` — this file: the tiers, and why each patch is or is not
+  independent of `tsg`.
+
+**Not rebuilt on the branch, on purpose:** the same code compiled as part of
+`wip` (the only commit that could reference something absent is the `.tsg` seam,
+which is excluded), and a `cargo check` on the branch would only re-verify that.
+If you want that verification anyway: 1–2 min, ~250 MB in `.tsbuild-check`,
+delete it afterwards.
+
+**Ordering:** `upstream` follows the order things happened — perf, then
+diagnostics, then the four bug fixes. A maintainer usually wants fixes first; the
+same 18 patches reorder cheaply (`git rebase -i 0fff6ab`, move the blocks) if you
+decide to submit rather than just push.

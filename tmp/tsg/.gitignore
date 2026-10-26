@@ -7,10 +7,12 @@
 # build, which must not happen (nothing outside this directory is written), so
 # the recipes point both here.  `.cargo/` is CARGO_HOME (cargo's bookkeeping,
 # with `registry` linked to ~/.cargo/registry so nothing is duplicated),
-# `.tsbuild/` is the CLI's build tree, both regenerable and pruned by clean.sh.
+# `.tsbuild/
+.review/` is the CLI's build tree, both regenerable and pruned by clean.sh.
 .ch/
 .cargo/
 .tsbuild/
+.review/
 .self/
 .roundtrip/
 .diff/
