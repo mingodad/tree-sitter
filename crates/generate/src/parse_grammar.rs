@@ -119,6 +119,15 @@ pub struct GrammarJSON {
     /// itself cannot, so a file that still says it is generating a partial grammar.
     #[serde(default)]
     inherits: Option<Value>,
+    /// The start rule.
+    ///
+    /// Without it the start rule is the first entry of `rules`, which makes the
+    /// meaning of a grammar depend on JSON key order — invisible in every editor
+    /// and lost the moment a tool re-sorts the object.  Naming it here promotes
+    /// that rule to the front of the variable list, which is where every later
+    /// stage looks for the start rule, so nothing downstream changes.
+    #[serde(default)]
+    start: Option<String>,
 }
 
 pub type ParseGrammarResult<T> = Result<T, ParseGrammarError>;
@@ -135,6 +144,10 @@ pub enum ParseGrammarError {
     InvalidReservedWordSet,
     #[error("Grammar Error: Unexpected rule `{0}` in `token()` call")]
     UnexpectedRule(Box<str>),
+    #[error("`{0}` is the declared start rule, but no rule has that name")]
+    StartNotFound(Box<str>),
+    #[error("`{0}` is the declared start rule, but it is a token; a token cannot start a tree")]
+    StartIsToken(Box<str>),
 }
 
 impl From<serde_json::Error> for ParseGrammarError {
@@ -278,7 +291,7 @@ pub(crate) fn parse_grammar(
         precedence_orderings.push(ordering);
     }
 
-    let variables = grammar_json
+    let mut variables = grammar_json
         .rules
         .into_iter()
         .map(|(name, r)| {
@@ -289,6 +302,25 @@ pub(crate) fn parse_grammar(
             })
         })
         .collect::<ParseGrammarResult<Vec<_>>>()?;
+
+    if let Some(start) = &grammar_json.start {
+        let name = pool.intern(start);
+        match variables.iter().position(|v| v.name == name) {
+            Some(0) => {}
+            Some(index) => {
+                let start_variable = variables.remove(index);
+                variables.insert(0, start_variable);
+            }
+            None => {
+                return Err(ParseGrammarError::StartNotFound(start.clone().into_boxed_str()));
+            }
+        }
+        // A rule whose body is a pattern is a token, and tree-sitter builds the
+        // lexer for tokens; a tree cannot start at one.
+        if matches!(pool.node(variables[0].root), Rule::String(_)) {
+            return Err(ParseGrammarError::StartIsToken(start.clone().into_boxed_str()));
+        }
+    }
 
     let reserved_sets = grammar_json
         .reserved
