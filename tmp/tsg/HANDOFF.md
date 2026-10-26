@@ -735,15 +735,15 @@ diff.sh  e2e.sh  roundtrip.sh  selfhost.sh  compare.py  coverage.py  json2ebnf.q
 bison-flex.g          metagrammar for the joined Bison/Flex `.g` format
 postgres16.g          Postgres stress grammar (705 rules)
 bison_flex/           tree-sitter grammar for `.g`, check.sh, extract.py, README
-bin/tree-sitter       prebuilt CLI, 8.4 MB: release+stripped build of
+bin/tree-sitter       prebuilt CLI, 8.6 MB: release+stripped build of
                       /Volumes/RamDisk/tree-sitter at patches 0001-0011 plus
                       the repo's `wip` commits (NOT stock: it has --lalr,
                       --max-states, --report-states-for-rule,
-                      --report-lex-states, --stamp).  It predates
-                      --dump-expanded; for that flag build
-                      `cargo build --no-default-features -p tree-sitter-cli`
-                      (default features pull rquickjs/bindgen, which do not fit
-                      on the ramdisk).
+                      --report-lex-states, --stamp, --dump-expanded).
+                      Rebuild with CARGO_TARGET_DIR=~/.ts-build and
+                      CARGO_PROFILE_RELEASE_STRIP=true: the debug profile for
+                      the whole CLI tree is ~550 MB and does not fit on the
+                      ramdisk, a stripped release build is 27 s.
 target/ .diff/ .e2e/ .roundtrip/ .self/    build output and scratch, gitignored
 ```
 

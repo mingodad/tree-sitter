@@ -108,7 +108,13 @@ each one forces:
 ## 5. Reports that cannot be joined to anything
 
 - conflicts print symbol sequences and **no state id**, so conflict →
-  `--report-states-for-rule` does not join;
+  `--report-states-for-rule` does not join.  The other half of the join now
+  exists: `generate --dump-expanded` writes the grammar the table is built
+  from (`{rule}_repeatN` aux rules, inlined hidden variables, precedence on
+  individual steps), so the rule name in a conflict leads to the productions
+  that actually conflict.  Measured on the Postgres port: 1118 written rules
+  become 727 variables and 6965 productions, 99 variables invented by
+  repetition;
 - `0009` indexes lex states by minimised ids; whether they equal the
   `ts_lex_modes` numbers in `parser.c` (and the `lex_internal state:N` of
   `parse -d`) is **not yet verified** — if they differ, the report cannot be
