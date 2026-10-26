@@ -1113,9 +1113,11 @@ impl<'a> ParseTableBuilder<'a> {
             let next_state_id =
                 self.add_parse_state(&preceding_symbols, auxiliary_context, next_item_set);
             preceding_symbols.pop();
+            // Same as the terminal entries below: a rebuilt state contributes its
+            // gotos again, and the newer pass is the authoritative one.
             self.parse_table.states[state_id as usize]
                 .nonterminal_entries
-                .push(symbol, GotoAction::Goto(next_state_id));
+                .insert(symbol, GotoAction::Goto(next_state_id));
         }
         self.successor_sets.recycle(successors);
 
@@ -1251,9 +1253,15 @@ impl<'a> ParseTableBuilder<'a> {
                 .parse_table
                 .action_lists
                 .intern(&mut self.action_list_ids, entry.actions);
+            // A rebuilt state contributes its symbols again; the newer pass wins,
+            // which is what `insert` does and what the emitted C would do anyway
+            // (a repeated designated initializer keeps the last value). Appending
+            // instead inserted a second entry for the same symbol, which only the
+            // `debug_assert` in `ParseStateEntries::push` noticed — release builds
+            // emitted a table with `[sym] = ACTIONS(a), [sym] = ACTIONS(b)`.
             state
                 .terminal_entries
-                .push(symbol, ActionListId::new(index, entry.reusable));
+                .insert(symbol, ActionListId::new(index, entry.reusable));
         }
         state.nonterminal_entries.shrink_to_fit();
 

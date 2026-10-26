@@ -330,8 +330,15 @@ impl<V> ParseStateEntries<V> {
     }
 
     /// Adds an entry for `symbol`, which must not have one yet.
+    ///
+    /// A second entry for the same symbol is always a bug: `contains_key` and the
+    /// generated tables take the first match, so the duplicate would be silently
+    /// ignored (release) or abort (debug). Check it in every profile.
     pub fn push(&mut self, symbol: Symbol, value: V) {
-        debug_assert!(!self.contains_key(symbol));
+        assert!(
+            !self.contains_key(symbol),
+            "duplicate entry for symbol {symbol:?}"
+        );
         self.0.push((symbol, value));
     }
 
