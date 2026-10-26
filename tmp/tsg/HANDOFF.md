@@ -810,7 +810,7 @@ can never pass against a stale compiler.  The cost is nil: on the largest gramma
 here (`postgres16/grammar.tsg`, 116 KB) the debug binary takes 50 ms and a release
 build 9 ms, next to `tree-sitter generate`'s 3.8 s.  A release copy in `bin/`
 would buy 40 ms and add a way to test the wrong binary.  `cargo build` after
-`clean.sh --target` takes 0.7 s.
+`./clean.sh` (build trees included by default) takes 0.7 s.
 
 `cargo test --release -p tree-sitter-generate` (104 tests) is the only way to run
 the generator's tests here: a debug build of that crate is 277 MB and, with
@@ -902,10 +902,17 @@ Never leave the day's only copy on the RAM disk.
 - The ramdisk is 1.0 GiB total; keep an eye on `df -h /Volumes/RamDisk`.
   There are **two** cargo target trees — `target/` and
   `bison_flex/translate/target/` (135 MB, the translator has `regex`) — plus
-  `bin/` (9 MB).  `./clean.sh --dry-run --target` is the inventory;
-  `./clean.sh --target` removes every `target/` under this directory.  It used
-  to prune only `$root/target` and report the space it had not freed, which is
-  how 135 MB sat there while the script said 274 MB had gone.
+  the tree-sitter workspace's `target/` above this checkout (~300 MB), plus
+  `bin/` (9 MB).  `./clean.sh --dry-run` is the inventory; `./clean.sh` removes
+  every `target/` tree, because freeing the ramdisk is the point.
+  Two failure modes this fixed: the script used to prune only `$root/target`
+  (135 MB sat there while it claimed 274 MB had gone), and it used to remove
+  target trees only with an explicit `--target`, so the everyday
+  `./clean.sh` printed "freed 0 M" with 350 MB still on the disk.  Use
+  `--keep-target` when you would rather keep `target/debug/tsg` (the gates need
+  it; rebuilding costs ~15 s).  A `CARGO_TARGET_DIR` outside this directory
+  (`~/.ts-build` in the release recipe) is reported with its size and never
+  removed.
 - After `clean.sh --target`, the translator needs its metagrammar parser back:
   `./bison_flex/build-parser.sh` (0.3 s) before `cargo build` in
   `bison_flex/translate`.  `bison_flex/check.sh` calls it, so running the gate is

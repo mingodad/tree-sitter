@@ -4,15 +4,22 @@
 # directory, a build tree, or output that `tsg`/`tree-sitter` writes next to a
 # grammar (all of it is in .gitignore).
 #
-#   ./clean.sh                # scratch + generated parsers; keeps target/ bin/
-#   ./clean.sh --target       # also every cargo target/ tree (tsg ~150 M,
-#                             #   bison_flex/translate ~135 M) and, when the parent
-#                             #   directory is the tree-sitter workspace, its
-#                             #   target/ (~475 M); rebuilds are 2-30 s
-#                             #   (see --binaries for the recipes)
-#   ./clean.sh --binaries     # also bin/ (patched tree-sitter, g2tsg)
-#   ./clean.sh --all          # both
+#   ./clean.sh                # scratch + generated parsers + every cargo target/
+#                             #   tree (tsg ~50 M, translator ~135 M, and the
+#                             #   tree-sitter workspace's target/ ~300 M when this
+#                             #   checkout sits inside it); rebuilds are 2-30 s,
+#                             #   see --binaries for the recipes
+#   ./clean.sh --keep-target  # keep the target/ trees; rebuilding `tsg` costs
+#                             #   ~15 s and the gates need target/debug/tsg
+#   ./clean.sh --binaries     # also bin/ (patched tree-sitter, tsg, g2tsg)
+#   ./clean.sh --all          # target/ trees and bin/
 #   ./clean.sh --dry-run ...  # print what would go, remove nothing
+#
+# Freeing the ramdisk is the point, so removing build trees is the *default*:
+# it used to need --target, and the failure mode was a "freed 0 M" summary with
+# 350 M of target/ left behind.  Nothing outside this directory is ever
+# removed, so a CARGO_TARGET_DIR elsewhere (~/.ts-build in the recipes) is only
+# reported, never deleted.
 #
 # Never touches anything outside this directory.  The two things worth
 # protecting by hand are bin/tree-sitter (a release build of this checkout with
@@ -26,12 +33,13 @@ set -euo pipefail
 # and removed nothing — with the actual reason on stderr, easy to miss.
 root=$(cd "$(dirname "$0")" && pwd -P)
 dry=0
-want_target=0
+want_target=1
 want_binaries=0
 for arg in "$@"; do
     case $arg in
         --dry-run|-n) dry=1 ;;
         --target) want_target=1 ;;
+        --no-target|--keep-target) want_target=0 ;;
         --binaries) want_binaries=1 ;;
         --all) want_target=1; want_binaries=1 ;;
         -h|--help) awk 'NR > 1 && /^set -euo/ {exit} NR > 1 {sub(/^# ?/, ""); print}' "$0"; exit 0 ;;
@@ -105,6 +113,15 @@ prune_workspace_target() {
     freed=$((freed + size))
 }
 
+# Size in KiB, 0 when the path is missing: `du` writes nothing in that case and
+# an empty operand would make the arithmetic expansion an error.
+size_of() {
+    local k
+    [ -e "$1" ] || { echo 0; return; }
+    k=$(du -sk "$1" 2>/dev/null | awk 'NR==1 {print $1}')
+    echo "${k:-0}"
+}
+
 echo "clean.sh: $root"
 
 # 1. Scratch from the check scripts.  A parse log or a copied corpus is worth
@@ -141,10 +158,20 @@ while IFS= read -r f; do prune "$f"; done < <(find "$root" -maxdepth 3 -name '*.
 if [ "$want_target" = 1 ]; then
     while IFS= read -r d; do prune "$d"; done < <(find "$root" -maxdepth 6 \
         -name target -type d -prune 2>/dev/null | sort)
-    prune_workspace_target
+    # A redirector target dir (`.tsbuild`, `.xt`) is ours too, when it is inside;
+    # when it is elsewhere (~/.ts-build in the recipes) it is only reported.
     if [ -n "${CARGO_TARGET_DIR:-}" ]; then
-        echo "clean.sh: note: builds go to CARGO_TARGET_DIR=$CARGO_TARGET_DIR (outside this script)" >&2
+        ctd_real=$(cd "$CARGO_TARGET_DIR" 2>/dev/null && pwd -P) || ctd_real=
+        case ${ctd_real:-none} in
+            "$root"|"$root"/*) prune "$CARGO_TARGET_DIR" ;;
+            none) ;;
+            *)
+                printf '  outside       %6s M  CARGO_TARGET_DIR=%s (not this script'"'"'s to remove)\n' \
+                    "$(($(size_of "$CARGO_TARGET_DIR") / 1024))" "$CARGO_TARGET_DIR"
+                ;;
+        esac
     fi
+    prune_workspace_target
 fi
 if [ "$want_binaries" = 1 ]; then
     prune "$root/bin"
@@ -161,9 +188,23 @@ if [ "$want_binaries" = 1 ]; then
 EOF
 fi
 
+if [ "$want_target" = 0 ]; then
+    kept=0
+    for d in "$root/target" "$root"/*/target "$workspace_target"; do
+        [ -n "${d:-}" ] || continue
+        kept=$((kept + $(size_of "$d")))
+    done
+    if [ "$kept" -gt 0 ]; then
+        printf '  kept          %6s M  target/ trees (--keep-target)\n' "$((kept / 1024))"
+    fi
+fi
+
 after=$(df -k /Volumes/RamDisk 2>/dev/null | awk 'NR==2 {print $4}')
 printf '\n%s %s M, %s M free%s\n' \
     "$([ "$dry" = 1 ] && echo would free || echo freed)" "$((freed / 1024))" \
     "$((after / 1024))" \
     "$([ -n "${before:-}" ] && [ -n "${after:-}" ] && echo " (was $((before / 1024)) M)")"
-[ "$dry" = 1 ] || echo "gates: ./selfhost.sh ./diff.sh ./e2e.sh ./roundtrip.sh --parsers"
+if [ "$dry" = 0 ] && [ "$want_target" = 1 ]; then
+    echo "rebuild first: (cd tmp/tsg && cargo build -p tsg)   # gates need target/debug/tsg"
+    echo "gates: ./selfhost.sh ./diff.sh ./e2e.sh ./roundtrip.sh --parsers"
+fi
