@@ -135,6 +135,25 @@ Note what needs **no** change: the `if grammar_path.file_name() != "grammar.json
 write-back at line 397 already does the right thing for `.tsg` — it (re)writes
 `src/grammar.json`, which is exactly the byproduct we want committed.
 
+### Status (after `--dump-expanded`)
+
+Levels 1c/1e are implemented **by subprocess**, not in-process: `load_grammar_file`
+dispatches `*.tsg` to the `tsg` binary (`TREE_SITTER_TSG`, else `PATH`), and
+`default_grammar_path` finds `grammar.tsg` when there is no `grammar.js`. So
+`tree-sitter generate` and `tree-sitter generate --dump-expanded -` both work on
+a directory with nothing but a declarative grammar, and `src/grammar.json` is
+still written as a by-product.
+
+What that buys: tsg's stderr reaches the author verbatim, caret diagnostics and
+all; three tests in `generate.rs` pin the seam (stdout is the grammar, stderr is
+the error, a missing binary names `TREE_SITTER_TSG`).
+
+What it does not buy: the structured spans below. The subprocess road keeps
+`rendered` and loses `diagnostics`, so `--json-summary` cannot report positions
+and an editor has to re-parse the text. If Level 1.5 is ever built, this is the
+part that gets replaced by 1a–1c. When both `grammar.js` and `grammar.tsg` exist,
+`grammar.js` wins and a warning is logged, per the 1e policy below.
+
 ### 1d. Error type (the reason to do this in-process rather than shelling out)
 
 `LoadGrammarError` and `GenerateError` both derive `Serialize, Deserialize,

@@ -188,7 +188,7 @@ pub type LoadGrammarFileResult<T> = Result<T, LoadGrammarError>;
 #[cfg(feature = "load")]
 #[derive(Debug, Error, Serialize, Deserialize, PartialEq, Eq)]
 pub enum LoadGrammarError {
-    #[error("Path to a grammar file with `.js` or `.json` extension is required")]
+    #[error("Path to a grammar file with `.js`, `.json` or `.tsg` extension is required")]
     InvalidPath,
     #[error("Failed to load grammar.js -- {0}")]
     LoadJSGrammarFile(#[from] JSError),
@@ -196,6 +196,29 @@ pub enum LoadGrammarError {
     IO(IoError),
     #[error("Unknown grammar file extension: {0:?}")]
     FileExtension(PathBuf),
+    #[error(transparent)]
+    TSG(#[from] TSGError),
+}
+
+/// Running the `tsg` front end, which turns a `.tsg` file into grammar JSON.
+///
+/// `tsg` is deliberately not linked in: it is a separate, dependency-free binary,
+/// so this is a subprocess and its own diagnostics are passed through unchanged.
+#[cfg(feature = "load")]
+#[derive(Debug, Error, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TSGError {
+    #[error(
+        "Could not run the `tsg` front end (`{0}`): install it on PATH or set \
+         TREE_SITTER_TSG to its path"
+    )]
+    NotFound(Box<str>),
+    #[error("The `tsg` front end refused {grammar_path}:\n{stderr}")]
+    Refused {
+        grammar_path: Box<str>,
+        stderr: Box<str>,
+    },
+    #[error("The `tsg` front end wrote invalid UTF-8 to stdout")]
+    Output,
 }
 
 #[cfg(feature = "load")]
@@ -482,6 +505,30 @@ pub fn stamp_parser_for_grammar(
     })
 }
 
+/// The grammar file a directory implies.
+///
+/// `grammar.js` wins if it exists, because a repository that has both is a
+/// JavaScript grammar that also happens to carry a `.tsg` translation. A
+/// directory with only a declarative grammar needs no `--grammar-path` and no
+/// intermediate `grammar.json`: the front end is run on demand.
+#[cfg(feature = "load")]
+pub fn default_grammar_path(repo_path: &Path) -> PathBuf {
+    let js_path = repo_path.join("grammar.js");
+    let tsg_path = repo_path.join("grammar.tsg");
+    if js_path.exists() {
+        if tsg_path.exists() {
+            log::warn!(
+                "both `grammar.js` and `grammar.tsg` exist in {}: using `grammar.js`; \
+                 pass the grammar path explicitly to choose the other one",
+                repo_path.display()
+            );
+        }
+        js_path
+    } else {
+        tsg_path
+    }
+}
+
 #[cfg(feature = "load")]
 #[expect(
     clippy::too_many_arguments,
@@ -529,7 +576,7 @@ where
             //     - grammar.js sits inside <root>/
             //     - grammar.json sits inside <root>/src/
             let repo_root = match path_buf.extension() {
-                Some(e) if e == "js" => path_buf.parent(),
+                Some(e) if e == "js" || e == "tsg" => path_buf.parent(),
                 Some(e) if e == "json" => path_buf.parent().and_then(Path::parent),
                 _ => None,
             };
@@ -539,7 +586,7 @@ where
             path_buf
         }
     } else {
-        repo_path.join("grammar.js")
+        default_grammar_path(&repo_path)
     };
 
     // Read the grammar file.
@@ -786,8 +833,42 @@ pub fn load_grammar_file(
         Some("js") => Ok(load_js_grammar_file(grammar_path, js_runtime)?),
         Some("json") => Ok(fs::read_to_string(grammar_path)
             .map_err(|e| LoadGrammarError::IO(IoError::new(e, Some(grammar_path))))?),
+        Some("tsg") => Ok(load_tsg_grammar_file(grammar_path)?),
         _ => Err(LoadGrammarError::FileExtension(grammar_path.to_owned()))?,
     }
+}
+
+/// The `tsg` binary to run, honouring `TREE_SITTER_TSG`.
+#[cfg(feature = "load")]
+fn tsg_executable() -> Box<str> {
+    env::var("TREE_SITTER_TSG")
+        .unwrap_or_else(|_| "tsg".to_string())
+        .into_boxed_str()
+}
+
+#[cfg(feature = "load")]
+fn load_tsg_grammar_file(grammar_path: &Path) -> Result<String, TSGError> {
+    load_tsg_grammar_file_with(grammar_path, &tsg_executable())
+}
+
+/// Turn a `.tsg` file into grammar JSON by running the front end.
+///
+/// Its stderr is passed through verbatim, because that is where `tsg` puts the
+/// diagnostics: line, column, and the error tour. Nothing is written to disk.
+#[cfg(feature = "load")]
+fn load_tsg_grammar_file_with(grammar_path: &Path, tsg: &str) -> Result<String, TSGError> {
+    let output = Command::new(tsg)
+        .arg(grammar_path)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|_| TSGError::NotFound(tsg.into()))?;
+    if !output.status.success() {
+        return Err(TSGError::Refused {
+            grammar_path: grammar_path.display().to_string().into_boxed_str(),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string().into_boxed_str(),
+        });
+    }
+    String::from_utf8(output.stdout).map_err(|_| TSGError::Output)
 }
 
 #[cfg(feature = "load")]
@@ -910,6 +991,67 @@ fn load_js_grammar_file(grammar_path: &Path, js_runtime: Option<&str>) -> JSResu
 #[cfg(feature = "load")]
 pub fn write_file(path: &Path, body: impl AsRef<[u8]>) -> GenerateResult<()> {
     fs::write(path, body).map_err(|e| GenerateError::IO(IoError::new(e, Some(path))))
+}
+
+#[cfg(all(test, feature = "load"))]
+mod tsg_tests {
+    use std::{fs, os::unix::fs::PermissionsExt};
+
+    use tempfile::TempDir;
+
+    use super::{TSGError, load_tsg_grammar_file_with};
+
+    /// A stand-in for the real `tsg`, so the seam is tested without it: whatever
+    /// the front end prints is the grammar JSON, and its stderr is the error.
+    fn shim(dir: &TempDir, body: &str) -> String {
+        let path = dir.path().join("tsg-shim");
+        fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&path, permissions).unwrap();
+        path.to_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn the_tsg_extension_writes_grammar_json_to_stdout() {
+        let dir = TempDir::new().unwrap();
+        let grammar_path = dir.path().join("grammar.tsg");
+        fs::write(&grammar_path, "source_file: expr;\n").unwrap();
+        let tsg = shim(
+            &dir,
+            r#"echo '{"name": "from_tsg", "rules": {}}'"#,
+        );
+        let json = load_tsg_grammar_file_with(&grammar_path, &tsg).unwrap();
+        assert_eq!(json.trim(), r#"{"name": "from_tsg", "rules": {}}"#);
+    }
+
+    /// A `.tsg` that does not compile must not be reported as a generator error:
+    /// `tsg`'s own diagnostics, line numbers included, have to reach the author.
+    #[test]
+    fn a_refused_grammar_carries_the_front_ends_stderr() {
+        let dir = TempDir::new().unwrap();
+        let grammar_path = dir.path().join("grammar.tsg");
+        fs::write(&grammar_path, "source_file: ;\n").unwrap();
+        let tsg = shim(
+            &dir,
+            "echo 'error: expected an expression' >&2\nexit 1",
+        );
+        let error = load_tsg_grammar_file_with(&grammar_path, &tsg).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("grammar.tsg"), "{message}");
+        assert!(message.contains("expected an expression"), "{message}");
+        assert!(message.contains("source_file: ;") || message.contains("error:"), "{message}");
+    }
+
+    #[test]
+    fn a_missing_front_end_is_named_with_the_way_to_fix_it() {
+        let dir = TempDir::new().unwrap();
+        let error =
+            load_tsg_grammar_file_with(&dir.path().join("grammar.tsg"), "/nonexistent/tsg")
+                .unwrap_err();
+        assert!(matches!(error, TSGError::NotFound(_)), "{error:?}");
+        assert!(error.to_string().contains("TREE_SITTER_TSG"), "{error}");
+    }
 }
 
 #[cfg(test)]

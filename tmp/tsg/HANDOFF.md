@@ -16,6 +16,13 @@ Location: `/Volumes/RamDisk/tree-sitter/tmp/tsg` (also reachable as
 directory — see *Constraints*.
 
 Pipeline: `.tsg → src/grammar.json → tree-sitter generate → parser.c`.
+The middle arrow can now be skipped: the patched CLI accepts `*.tsg` directly
+(`load_grammar_file` runs the `tsg` binary, found via `TREE_SITTER_TSG` or
+`PATH`; a directory with only `grammar.tsg` needs no argument at all), so
+`tree-sitter generate`, `--stamp` and `--dump-expanded` all work on the
+declarative source. tsg's stderr is passed through verbatim, so caret
+diagnostics survive; the structured spans of `INTEGRATION.md` §1d do not, and
+that is what the in-process route would add.
 
 ## State at this stop: green
 

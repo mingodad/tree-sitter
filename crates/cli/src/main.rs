@@ -993,7 +993,7 @@ impl Generate {
             let grammar_path = self
                 .grammar_path
                 .clone()
-                .unwrap_or_else(|| current_dir.join("grammar.js"));
+                .unwrap_or_else(|| tree_sitter_generate::default_grammar_path(current_dir));
             let grammar_json =
                 tree_sitter_generate::load_grammar_file(&grammar_path, self.js_runtime.as_deref())?;
             let optimizations = if self.disable_optimizations {
@@ -1029,7 +1029,7 @@ impl Generate {
             let grammar_path = self
                 .grammar_path
                 .clone()
-                .unwrap_or_else(|| current_dir.join("grammar.js"));
+                .unwrap_or_else(|| tree_sitter_generate::default_grammar_path(current_dir));
             let grammar_json =
                 tree_sitter_generate::load_grammar_file(&grammar_path, self.js_runtime.as_deref())?;
             let mut diagnostics = Vec::new();
