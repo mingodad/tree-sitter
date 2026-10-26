@@ -1,0 +1,32 @@
+# LR conflicts for the hand-fixed copy of postgres16.
+#
+# Generated from postgres16.g by g2tsg (with the flex `\NNN` escape fix), then
+# hand-edited so the grammar generates.  Compared to postgres16/conflicts.txt
+# there are five changes, all forced by the nullable->EBNF rewrite that made
+# `opt_frame_clause` disappear as a rule:
+#
+#   - opt_frame_clause unreserved_keyword     (rule no longer exists)
+#   + frame_bound unreserved_keyword          (the rule it was inlined into)
+#   + expr_list
+#   + func_arg_list
+#   + json_predicate_type_constraint
+#   + joined_table
+#
+# Each of the four additions is load-bearing: dropping any one of them makes
+# `tree-sitter generate --lalr` fail with that sequence unresolved.
+utility_option_name unreserved_keyword
+simple_select
+a_expr
+target_el
+frame_bound unreserved_keyword
+ConstDatetime col_name_keyword
+table_ref
+OptTempTableName unreserved_keyword
+a_expr bare_label_keyword
+ConstDatetime
+b_expr
+func_table
+expr_list
+func_arg_list
+json_predicate_type_constraint
+joined_table
