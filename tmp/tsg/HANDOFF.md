@@ -805,8 +805,10 @@ directory**:
 `build-cli.sh` cds up to the workspace, pins `CARGO_HOME=.cargo` and
 `CARGO_TARGET_DIR=.tsbuild` (both inside `tmp/tsg`, both gitignored), copies
 `bin/tree-sitter`, records `bin/VERSIONS`, and deletes the 420 MB build tree.
-`.cargo/registry` is a **copy** of `~/.cargo/registry` — a symlink would let
-cargo write back into the home directory.
+`.cargo/registry` is a **symlink** to `~/.cargo/registry`: the registry is read
+on every resolve and written only when a crate is genuinely fetched — the one
+write that is ordinary cargo behaviour for every project on the machine — while
+cargo's 64 KB bookkeeping (`.global-cache`) stays inside this directory.
 
 Two rules this recipe exists to enforce, both broken once already:
 

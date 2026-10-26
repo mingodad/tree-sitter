@@ -5,9 +5,9 @@
 # Scratch from the check scripts (parse logs, corpus copies, built parsers).
 # CARGO_HOME and CARGO_TARGET_DIR: cargo writes ~/.cargo/.global-cache on every
 # build, which must not happen (nothing outside this directory is written), so
-# the recipes point both here.  `.cargo/` is a *copy* of ~/.cargo/registry
-# (a symlink would let cargo write back out), `.tsbuild/` is the CLI's build
-# tree, both regenerable and both pruned by clean.sh.
+# the recipes point both here.  `.cargo/` is CARGO_HOME (cargo's bookkeeping,
+# with `registry` linked to ~/.cargo/registry so nothing is duplicated),
+# `.tsbuild/` is the CLI's build tree, both regenerable and pruned by clean.sh.
 .ch/
 .cargo/
 .tsbuild/

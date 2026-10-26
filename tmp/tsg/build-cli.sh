@@ -10,8 +10,10 @@
 # cd's up to it, but CARGO_TARGET_DIR / CARGO_HOME point back inside here:
 #
 #   .tsbuild/   build tree, removed at the end
-#   .cargo/     a copy of ~/.cargo/registry, because --offline needs the index;
-#               100 MB, regenerable, pruned by clean.sh
+#   .cargo/     CARGO_HOME: cargo's 64 KB bookkeeping lands here, and
+#               registry is a symlink to ~/.cargo/registry (read-mostly; only a
+#               genuinely new crate download writes there, which is ordinary
+#               cargo behaviour), so nothing is copied onto the ramdisk
 #
 # This exists because the previous recipe put the build tree in ~/.ts-build: a
 # 408 MB directory on the SSD, outside the project, which is not ours to write.
@@ -25,11 +27,16 @@ if [ ! -f "$root/Cargo.toml" ] || ! grep -qx '\[workspace\]' "$root/Cargo.toml";
     exit 2
 fi
 
-if [ ! -d "$here/.cargo/registry" ]; then
-    mkdir -p "$here/.cargo"
-    # A copy, not a symlink: a symlink would let cargo write back into ~/.cargo.
-    cp -R "$HOME/.cargo/registry" "$here/.cargo/registry"
-    echo "== copied the registry into .cargo/ ($(du -sk "$here/.cargo" | awk '{print int($1/1024)}') M)"
+mkdir -p "$here/.cargo"
+if [ ! -e "$here/.cargo/registry" ]; then
+    # The registry is *read* on every resolve and *written* only when a crate is
+    # actually fetched, which is the one case where a write into ~/.cargo is the
+    # ordinary cargo behaviour every other project on this machine already has.
+    # So link it instead of copying 100 MB onto the ramdisk; the bookkeeping
+    # files (.global-cache, .package-cache) stay here, because CARGO_HOME is
+    # this directory.
+    ln -s "$HOME/.cargo/registry" "$here/.cargo/registry"
+    echo "== linked .cargo/registry -> ~/.cargo/registry (0 bytes here)"
 fi
 
 echo "== building tree-sitter-cli"
