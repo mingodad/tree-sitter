@@ -814,4 +814,109 @@ mod tests {
         )
         .unwrap();
     }
+
+    /// Two independent ambiguities, and no `conflicts` entry for either.
+    const AMBIGUOUS_GRAMMAR: &str = r#"{
+        "name": "unresolved_conflicts",
+        "rules": {
+            "source_file": {"type": "CHOICE", "members": [
+                {"type": "SYMBOL", "name": "statement"},
+                {"type": "SYMBOL", "name": "expr"}
+            ]},
+            "statement": {"type": "CHOICE", "members": [
+                {"type": "SEQ", "members": [
+                    {"type": "STRING", "value": "if"},
+                    {"type": "SYMBOL", "name": "expr"},
+                    {"type": "STRING", "value": "then"},
+                    {"type": "SYMBOL", "name": "statement"}
+                ]},
+                {"type": "SEQ", "members": [
+                    {"type": "STRING", "value": "if"},
+                    {"type": "SYMBOL", "name": "expr"},
+                    {"type": "STRING", "value": "then"},
+                    {"type": "SYMBOL", "name": "statement"},
+                    {"type": "STRING", "value": "else"},
+                    {"type": "SYMBOL", "name": "statement"}
+                ]}
+            ]},
+            "expr": {"type": "CHOICE", "members": [
+                {"type": "SYMBOL", "name": "identifier"},
+                {"type": "SEQ", "members": [
+                    {"type": "SYMBOL", "name": "expr"},
+                    {"type": "STRING", "value": "+"},
+                    {"type": "SYMBOL", "name": "expr"}
+                ]}
+            ]},
+            "identifier": {"type": "PATTERN", "value": "[a-z]+"}
+        }
+    }"#;
+
+    fn generate_error_message(grammar_json: &str) -> String {
+        let error = super::generate_parser_for_grammar(
+            grammar_json,
+            None,
+            super::OptLevel::default(),
+            &mut Vec::new(),
+        )
+        .expect_err("grammar should not generate");
+        let mut message = error.to_string();
+        let mut source = std::error::Error::source(&error);
+        while let Some(error) = source {
+            message.push_str("\n");
+            message.push_str(&error.to_string());
+            source = error.source();
+        }
+        message
+    }
+
+    #[test]
+    fn test_every_unresolved_conflict_is_reported_in_one_run() {
+        // Reporting only the first conflict makes a ported grammar take one `generate`
+        // run per conflict pair; bison reports them all at once.
+        let message = generate_error_message(AMBIGUOUS_GRAMMAR);
+        assert!(
+            message.contains("Unresolved conflicts for 2 symbol sequences"),
+            "expected both conflicts in one message, got: {message}"
+        );
+        assert!(message.contains("expr '+' expr"), "{message}");
+        assert!(message.contains("statement •  'else'"), "{message}");
+    }
+
+    #[test]
+    fn test_a_declared_conflict_is_not_reported() {
+        let grammar_json = AMBIGUOUS_GRAMMAR.replace(
+            r#""name": "unresolved_conflicts","#,
+            r#""name": "unresolved_conflicts", "conflicts": [["statement"], ["expr"]],"#,
+        );
+        assert_ne!(grammar_json, AMBIGUOUS_GRAMMAR);
+        super::generate_parser_for_grammar(
+            &grammar_json,
+            None,
+            super::OptLevel::default(),
+            &mut Vec::new(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_a_single_unresolved_conflict_keeps_the_detailed_report() {
+        // With one conflict there is room for the item sets and the precedence that
+        // would resolve it, so keep that report instead of the summary.
+        let grammar_json = AMBIGUOUS_GRAMMAR.replace(
+            r#",
+                {"type": "SEQ", "members": [
+                    {"type": "SYMBOL", "name": "expr"},
+                    {"type": "STRING", "value": "+"},
+                    {"type": "SYMBOL", "name": "expr"}
+                ]}"#,
+            "",
+        );
+        assert_ne!(grammar_json, AMBIGUOUS_GRAMMAR);
+        let message = generate_error_message(&grammar_json);
+        assert!(
+            message.contains("Unresolved conflict for symbol sequence"),
+            "{message}"
+        );
+        assert!(message.contains("Possible interpretations"), "{message}");
+    }
 }
