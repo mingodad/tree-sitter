@@ -262,6 +262,12 @@ bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct OptLevel: u32 {
         const MergeStates = 1 << 0;
+        /// Build LALR(1) states instead of canonical LR(1) states: when a new
+        /// state has the same kernel core as an existing one, merge their
+        /// lookahead sets and rebuild the state. This is what yacc/bison do,
+        /// and it keeps large grammars from exploding in state count, at the
+        /// cost of reporting conflicts that canonical LR(1) would not have.
+        const Lalr = 1 << 1;
     }
 }
 
@@ -340,6 +346,7 @@ pub fn generate_parser_in_directory<T, U, V>(
     js_runtime: Option<&str>,
     generate_parser: bool,
     optimizations: OptLevel,
+    max_states: Option<usize>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> GenerateResult<()>
 where
@@ -421,6 +428,7 @@ where
         semantic_version.map(|v| (v.major as u8, v.minor as u8, v.patch as u8)),
         report_symbol_name,
         optimizations,
+        max_states,
         diagnostics,
     )?;
 
@@ -449,6 +457,7 @@ pub fn generate_parser_for_grammar(
         semantic_version,
         None,
         optimizations,
+        None,
         diagnostics,
     )?;
     Ok((name, parser.c_code))
@@ -500,6 +509,7 @@ fn generate_parser_for_grammar_with_opts(
     semantic_version: Option<(u8, u8, u8)>,
     report_symbol_name: Option<&str>,
     optimizations: OptLevel,
+    max_states: Option<usize>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> GenerateResult<GeneratedParser> {
     let grammar_name = input_grammar.name;
@@ -529,6 +539,7 @@ fn generate_parser_for_grammar_with_opts(
         &str_pool,
         report_symbol_name,
         optimizations,
+        max_states,
         diagnostics,
     )?;
     let c_code = render_c_code(

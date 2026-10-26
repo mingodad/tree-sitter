@@ -3,13 +3,11 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     hash::{BuildHasher as _, BuildHasherDefault},
     num::NonZeroU32,
+    time::{Duration, Instant},
 };
 
 use hashbrown::{HashTable, hash_table};
-use indexmap::{
-    IndexMap,
-    map::{Entry, RawEntryApiV1, raw_entry_v1::RawEntryMut},
-};
+use indexmap::{IndexMap, map::Entry};
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet, FxHasher};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -199,14 +197,15 @@ impl AuxiliarySymbolContexts {
 
 pub struct ParseStateInfo<'a> {
     pub preceding_symbols_by_id: Vec<SymbolSequence>,
-    item_sets_by_ids: IndexMap<ParseItemSet<'a>, ParseStateId, BuildHasherDefault<FxHasher>>,
+    /// Each state's kernel, indexed by state id.
+    item_sets_by_ids: Vec<ParseItemSet<'a>>,
     pub lookaheads: LookaheadSetPool,
 }
 
 impl<'a> ParseStateInfo<'a> {
     #[must_use]
     pub fn item_set(&self, id: ParseStateId) -> &ParseItemSet<'a> {
-        self.item_sets_by_ids.get_index(id as usize).unwrap().0
+        &self.item_sets_by_ids[id as usize]
     }
 }
 
@@ -328,7 +327,22 @@ struct ParseTableBuilder<'a> {
     lexical_grammar: &'a LexicalGrammar,
     variable_info: &'a [VariableInfo],
     core_ids_by_core: FxHashMap<ParseItemSetCore<'a>, u32>,
+    /// Canonical LR(1) mode: dedup of states by their full kernel (items and lookaheads).
     state_ids_by_item_set: IndexMap<ParseItemSet<'a>, ParseStateId, BuildHasherDefault<FxHasher>>,
+    /// LALR mode: one state per kernel core (items only, no lookaheads).
+    state_ids_by_core: FxHashMap<ParseItemSetCore<'a>, ParseStateId>,
+    /// LALR mode: states whose lookaheads grew after they were built, so their
+    /// actions must be rebuilt. Lookahead sets only grow, so this reaches a
+    /// fixpoint.
+    dirty_states: FxHashSet<ParseStateId>,
+    /// Each state's kernel, indexed by state id.
+    kernels: Vec<ParseItemSet<'a>>,
+    /// Each state's auxiliary context, so a rebuilt state can reproduce it.
+    auxiliary_context_by_id: Vec<Option<AuxiliaryContextId>>,
+    /// Whether to build LALR(1) states instead of canonical LR(1) states.
+    lalr: bool,
+    /// Abort once this many parse states exist.
+    max_states: Option<usize>,
     preceding_symbols_by_id: Vec<SymbolSequence>,
     production_info_ids_by_prod_id: Vec<Option<ProductionInfoId>>,
     parse_state_queue: VecDeque<ParseStateQueueEntry>,
@@ -363,6 +377,13 @@ pub enum ParseTableBuilderError {
     ImproperNonTerminalExtra(Box<str>),
     #[error("State count `{0}` exceeds the max value {max}.", max=u16::MAX)]
     StateCount(usize),
+    #[error(
+        "Grammar needs more than {max} parse states. Canonical LR(1) state counts can explode \
+         on large grammars; the number of states depends on lookahead sets, not just on the \
+         grammar's size. Try `--lalr`, which merges states that differ only in lookaheads (the \
+         way yacc and bison do), or raise `--max-states`."
+    )]
+    TooManyStates { max: usize },
 }
 
 impl From<ConflictError> for ParseTableBuilderError {
@@ -541,6 +562,8 @@ impl<'a> ParseTableBuilder<'a> {
         item_set_builder: ParseItemSetBuilder<'a>,
         variable_info: &'a [VariableInfo],
         str_pool: &'a StrPool,
+        lalr: bool,
+        max_states: Option<usize>,
     ) -> Self {
         let symbol_indexer = SymbolIndexer::new(syntax_grammar, lexical_grammar);
         Self {
@@ -550,6 +573,12 @@ impl<'a> ParseTableBuilder<'a> {
             variable_info,
             non_terminal_extra_states: Vec::new(),
             state_ids_by_item_set: IndexMap::default(),
+            state_ids_by_core: FxHashMap::default(),
+            dirty_states: FxHashSet::default(),
+            kernels: Vec::new(),
+            auxiliary_context_by_id: Vec::new(),
+            lalr,
+            max_states,
             core_ids_by_core: FxHashMap::default(),
             preceding_symbols_by_id: Vec::new(),
             production_info_ids_by_prod_id: vec![None; syntax_grammar.productions.len()],
@@ -651,16 +680,45 @@ impl<'a> ParseTableBuilder<'a> {
             self.non_terminal_extra_states.push((terminal, state_id));
         }
 
+        let started = Instant::now();
+        let mut last_progress = started;
         while let Some(entry) = self.parse_state_queue.pop_front() {
-            // The dedup-map key is each state's kernel (the GOTO result, pre closure).
-            // Two states are identical iff their kernels match.
-            let kernel = self
-                .state_ids_by_item_set
-                .get_index(entry.state_id as usize)
-                // Invariant: `state_id` is the map's insertion index
-                .unwrap()
-                .0;
-            let item_set = self.item_set_builder.transitive_closure(kernel);
+            if let Some(max) = self.max_states
+                && self.parse_table.states.len() > max
+            {
+                return Err(ParseTableBuilderError::TooManyStates { max });
+            }
+
+            // Slow grammars used to fail with no output at all. One line every
+            // couple of seconds is enough to tell "working" from "stuck", and
+            // costs nothing for grammars that finish quickly.
+            if last_progress.elapsed() >= Duration::from_secs(2) {
+                eprintln!(
+                    "  {} parse states, {} queued, {:.1}s ({})",
+                    self.parse_table.states.len(),
+                    self.parse_state_queue.len(),
+                    started.elapsed().as_secs_f64(),
+                    if self.lalr { "lalr" } else { "lr(1)" },
+                );
+                last_progress = Instant::now();
+            }
+
+            // In LALR mode a state can be revisited after more lookaheads reached
+            // it. Its actions are recomputed from scratch; action lists are
+            // interned, so rebuilding does not leak table entries.
+            if self.lalr && self.dirty_states.remove(&entry.state_id) {
+                let state = &mut self.parse_table.states[entry.state_id as usize];
+                state.terminal_entries = TerminalEntries::default();
+                state.nonterminal_entries = NonterminalEntries::default();
+                state.reserved_words = TokenSet::default();
+                state.has_eof_gated_reduce = false;
+            }
+
+            // The state's kernel is the GOTO result, before closure: two states
+            // are identical iff their kernels match.
+            let item_set = self
+                .item_set_builder
+                .transitive_closure(&self.kernels[entry.state_id as usize]);
 
             self.add_actions(
                 self.preceding_symbols_by_id[entry.state_id as usize].clone(),
@@ -684,7 +742,7 @@ impl<'a> ParseTableBuilder<'a> {
             self.parse_table,
             ParseStateInfo {
                 preceding_symbols_by_id: self.preceding_symbols_by_id,
-                item_sets_by_ids: self.state_ids_by_item_set,
+                item_sets_by_ids: self.kernels,
                 lookaheads: self.item_set_builder.lookaheads,
             },
         ))
@@ -696,45 +754,113 @@ impl<'a> ParseTableBuilder<'a> {
         preceding_auxiliary_context: Option<AuxiliaryContextId>,
         item_set: &ParseItemSet<'a>,
     ) -> ParseStateId {
-        // Hash the item set once, for both the lookup and a possible insert.
-        let hash = self.state_ids_by_item_set.hasher().hash_one(item_set);
-        match self
-            .state_ids_by_item_set
-            .raw_entry_mut_v1()
-            .from_key_hashed_nocheck(hash, item_set)
+        if self.lalr {
+            return self.merge_parse_state(
+                preceding_symbols,
+                preceding_auxiliary_context,
+                item_set,
+            );
+        }
+
+        // If an equivalent item set has already been processed, then return the
+        // existing parse state index.
+        if let Some(&state_id) = self.state_ids_by_item_set.get(item_set) {
+            return state_id;
+        }
+
+        // Otherwise, insert a new parse state and add it to the queue of parse
+        // states to populate.
+        let state_id = self.push_state(preceding_symbols, preceding_auxiliary_context, item_set);
+        self.state_ids_by_item_set
+            .insert(item_set.clone(), state_id);
+        state_id
+    }
+
+    /// LALR(1) state construction: states are identified by their kernel core,
+    /// not by their lookahead sets. When a new kernel has the same core as an
+    /// existing state, its lookaheads are merged into that state instead of
+    /// creating a new one, and the state is scheduled for a rebuild if its
+    /// lookaheads grew. This is how yacc and bison build their tables, and it is
+    /// what keeps a grammar with many lookahead contexts from multiplying states.
+    fn merge_parse_state(
+        &mut self,
+        preceding_symbols: &SymbolSequence,
+        preceding_auxiliary_context: Option<AuxiliaryContextId>,
+        item_set: &ParseItemSet<'a>,
+    ) -> ParseStateId {
+        let core = item_set.core();
+        let Some(&state_id) = self.state_ids_by_core.get(&core) else {
+            let state_id =
+                self.push_state(preceding_symbols, preceding_auxiliary_context, item_set);
+            self.state_ids_by_core.insert(core, state_id);
+            return state_id;
+        };
+
+        let mut grew = false;
         {
-            // If an equivalent item set has already been processed, then return
-            // the existing parse state index.
-            RawEntryMut::Occupied(o) => *o.get(),
-
-            // Otherwise, insert a new parse state and add it to the queue of
-            // parse states to populate.
-            RawEntryMut::Vacant(v) => {
-                let core = item_set.core();
-                let core_count = self.core_ids_by_core.len() as u32;
-                let core_id = *self.core_ids_by_core.entry(core).or_insert(core_count);
-
-                let state_id = self.parse_table.states.len() as u32;
-                self.preceding_symbols_by_id.push(preceding_symbols.clone());
-
-                self.parse_table.states.push(ParseState {
-                    id: state_id,
-                    lex_state_id: 0,
-                    external_lex_state_id: 0,
-                    terminal_entries: TerminalEntries::default(),
-                    nonterminal_entries: NonterminalEntries::default(),
-                    reserved_words: TokenSet::default(),
-                    core_id,
-                    has_eof_gated_reduce: false,
-                });
-                self.parse_state_queue.push_back(ParseStateQueueEntry {
-                    state_id,
-                    preceding_auxiliary_context,
-                });
-                v.insert_hashed_nocheck(hash, item_set.clone(), state_id);
-                state_id
+            let stored = &mut self.kernels[state_id as usize];
+            debug_assert_eq!(stored.entries.len(), item_set.entries.len());
+            for (dst, src) in stored.entries.iter_mut().zip(&item_set.entries) {
+                debug_assert!(dst.item == src.item);
+                let merged = self
+                    .item_set_builder
+                    .lookaheads
+                    .union(dst.lookaheads, src.lookaheads);
+                if merged != dst.lookaheads {
+                    dst.lookaheads = merged;
+                    grew = true;
+                }
+                let reserved = dst
+                    .following_reserved_word_set
+                    .max(src.following_reserved_word_set);
+                if reserved != dst.following_reserved_word_set {
+                    dst.following_reserved_word_set = reserved;
+                    grew = true;
+                }
             }
         }
+
+        if grew && self.dirty_states.insert(state_id) {
+            self.parse_state_queue.push_back(ParseStateQueueEntry {
+                state_id,
+                preceding_auxiliary_context: self.auxiliary_context_by_id[state_id as usize],
+            });
+        }
+        state_id
+    }
+
+    /// Adds a brand new parse state for `item_set` and queues it for population.
+    fn push_state(
+        &mut self,
+        preceding_symbols: &SymbolSequence,
+        preceding_auxiliary_context: Option<AuxiliaryContextId>,
+        item_set: &ParseItemSet<'a>,
+    ) -> ParseStateId {
+        let core = item_set.core();
+        let core_count = self.core_ids_by_core.len() as u32;
+        let core_id = *self.core_ids_by_core.entry(core).or_insert(core_count);
+
+        let state_id = self.parse_table.states.len() as u32;
+        self.preceding_symbols_by_id.push(preceding_symbols.clone());
+        self.auxiliary_context_by_id
+            .push(preceding_auxiliary_context);
+        self.kernels.push(item_set.clone());
+
+        self.parse_table.states.push(ParseState {
+            id: state_id,
+            lex_state_id: 0,
+            external_lex_state_id: 0,
+            terminal_entries: TerminalEntries::default(),
+            nonterminal_entries: NonterminalEntries::default(),
+            reserved_words: TokenSet::default(),
+            core_id,
+            has_eof_gated_reduce: false,
+        });
+        self.parse_state_queue.push_back(ParseStateQueueEntry {
+            state_id,
+            preceding_auxiliary_context,
+        });
+        state_id
     }
 
     fn add_actions(
@@ -1554,6 +1680,8 @@ pub fn build_parse_table<'a>(
     item_set_builder: ParseItemSetBuilder<'a>,
     variable_info: &'a [VariableInfo],
     str_pool: &'a StrPool,
+    lalr: bool,
+    max_states: Option<usize>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> BuildTableResult<(ParseTable, ParseStateInfo<'a>)> {
     ParseTableBuilder::new(
@@ -1562,6 +1690,8 @@ pub fn build_parse_table<'a>(
         item_set_builder,
         variable_info,
         str_pool,
+        lalr,
+        max_states,
     )
     .build(diagnostics)
 }

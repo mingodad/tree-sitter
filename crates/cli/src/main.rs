@@ -168,6 +168,16 @@ struct Generate {
     /// the merging of compatible parse states.
     #[arg(long)]
     pub disable_optimizations: bool,
+    /// Build LALR(1) parse states instead of canonical LR(1) states.
+    ///
+    /// States that differ only in their lookahead sets are merged, the way yacc and
+    /// bison do it. This is much smaller and faster for large grammars, but it can
+    /// report conflicts that canonical LR(1) resolves away.
+    #[arg(long)]
+    pub lalr: bool,
+    /// Abort if the parser needs more than this many parse states.
+    #[arg(long, value_name = "N")]
+    pub max_states: Option<usize>,
 }
 
 #[derive(Args)]
@@ -969,9 +979,12 @@ impl Generate {
             !self.no_parser,
             if self.disable_optimizations {
                 OptLevel::empty()
+            } else if self.lalr {
+                OptLevel::default() | OptLevel::Lalr
             } else {
                 OptLevel::default()
             },
+            self.max_states,
             &mut diagnostics,
         );
         if json_summary {
