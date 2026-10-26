@@ -11,7 +11,7 @@ use crate::{
     strpool::StrId,
 };
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(tag = "type", deny_unknown_fields)]
 #[expect(
     non_camel_case_types,
@@ -83,14 +83,14 @@ enum RuleJSON {
     EOF,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(untagged)]
 enum PrecedenceValueJSON {
     Integer(i32),
     Name(String),
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct GrammarJSON {
     pub name: String,
@@ -107,17 +107,17 @@ pub struct GrammarJSON {
     inline: Vec<String>,
     #[serde(default)]
     supertypes: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     word: Option<String>,
     #[serde(default)]
     reserved: Map<String, Value>,
     /// A JSON schema reference written by tooling. Past it, nothing in the file's
     /// meaning, but `deny_unknown_fields` would reject every file that carries it.
-    #[serde(rename = "$schema", default)]
+    #[serde(rename = "$schema", default, skip_serializing_if = "Option::is_none")]
     _schema: Option<Value>,
     /// The JS DSL merges an inherited grammar before generating; the generator
     /// itself cannot, so a file that still says it is generating a partial grammar.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     inherits: Option<Value>,
     /// The start rule.
     ///
@@ -126,7 +126,7 @@ pub struct GrammarJSON {
     /// and lost the moment a tool re-sorts the object.  Naming it here promotes
     /// that rule to the front of the variable list, which is where every later
     /// stage looks for the start rule, so nothing downstream changes.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     start: Option<String>,
 }
 
@@ -312,13 +312,17 @@ pub(crate) fn parse_grammar(
                 variables.insert(0, start_variable);
             }
             None => {
-                return Err(ParseGrammarError::StartNotFound(start.clone().into_boxed_str()));
+                return Err(ParseGrammarError::StartNotFound(
+                    start.clone().into_boxed_str(),
+                ));
             }
         }
         // A rule whose body is a pattern is a token, and tree-sitter builds the
         // lexer for tokens; a tree cannot start at one.
         if matches!(pool.node(variables[0].root), Rule::String(_)) {
-            return Err(ParseGrammarError::StartIsToken(start.clone().into_boxed_str()));
+            return Err(ParseGrammarError::StartIsToken(
+                start.clone().into_boxed_str(),
+            ));
         }
     }
 

@@ -114,6 +114,13 @@ struct Generate {
     /// Only generate `grammar.json` and `node-types.json`
     #[arg(long)]
     pub no_parser: bool,
+    /// Build the grammar and print a digest of the parser it makes, then exit.
+    ///
+    /// Nothing is written. Two grammars with the same digest build the same
+    /// parser, so this is how to check that a rewrite of a grammar changed
+    /// nothing: compare digests, not grammar.json text.
+    #[arg(long)]
+    pub stamp: bool,
     /// Deprecated: use the `build` command
     #[arg(long, short = 'b')]
     pub build: bool,
@@ -972,6 +979,35 @@ impl Generate {
                         version.parse().expect("invalid abi version flag")
                     }
                 });
+
+        if self.stamp {
+            let grammar_path = self
+                .grammar_path
+                .clone()
+                .unwrap_or_else(|| current_dir.join("grammar.js"));
+            let grammar_json =
+                tree_sitter_generate::load_grammar_file(&grammar_path, self.js_runtime.as_deref())?;
+            let optimizations = if self.disable_optimizations {
+                OptLevel::empty()
+            } else if self.lalr {
+                OptLevel::default() | OptLevel::Lalr
+            } else {
+                OptLevel::default()
+            };
+            let mut diagnostics = Vec::new();
+            let stamp = tree_sitter_generate::stamp_parser_for_grammar(
+                &grammar_json,
+                abi_version,
+                optimizations,
+                self.max_states,
+                &mut diagnostics,
+            )?;
+            for d in &diagnostics {
+                warn!("{d}");
+            }
+            println!("{}", serde_json::to_string_pretty(&stamp)?);
+            return Ok(());
+        }
 
         let json_summary = if self.json {
             warn!("--json is deprecated, use --json-summary instead");
