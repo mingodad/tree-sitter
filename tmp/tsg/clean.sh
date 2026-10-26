@@ -127,8 +127,17 @@ echo "clean.sh: $root"
 # 1. Scratch from the check scripts.  A parse log or a copied corpus is worth
 #    nothing after the run that wrote it.
 for d in .self .roundtrip .diff .e2e .harness .xmode .probe .bc .ref .fmt \
-         .g2tsg .tsbuild .tsgrel .scan .scan2 .scan3 .ch .cargo bison_flex/.corpus; do
+         .g2tsg .tsbuild .tsgrel .scan .scan2 .scan3 .ch bison_flex/.corpus; do
     prune "$root/$d"
+done
+
+# `.cargo` is CARGO_HOME and also holds the tracked config.toml ([build]
+# incremental = false), so the directory stays and only its scratch goes: the
+# registry symlink, the bookkeeping files cargo writes there.
+for scratch in "$root/.cargo/registry" "$root/.cargo/.global-cache" \
+               "$root/.cargo/.package-cache" "$root/.cargo/.package-cache-mutate"; do
+    [ -e "$scratch" ] || [ -L "$scratch" ] || continue
+    prune "$scratch"
 done
 # Any `.check` (gates build their parsers there) and any leftover `.old*`.
 while IFS= read -r d; do prune "$d"; done < <(find "$root" -maxdepth 2 -name '.check*' -o -maxdepth 2 -name '.old*' 2>/dev/null | sort)
@@ -180,11 +189,12 @@ if [ "$want_binaries" = 1 ]; then
     CARGO_TARGET_DIR=tmp/tsg/.tsbuild CARGO_INCREMENTAL=0 \
     CARGO_PROFILE_RELEASE_STRIP=true cargo build --release --offline -p tree-sitter-cli
     cp tmp/tsg/.tsbuild/release/tree-sitter tmp/tsg/bin/tree-sitter && rm -rf tmp/tsg/.tsbuild
-    (cd tmp/tsg && cargo build && ./bison_flex/build-parser.sh)   # parser.c for build.rs
+    (cd tmp/tsg && CARGO_HOME=$PWD/.cargo cargo build && ./bison_flex/build-parser.sh)
     (cd tmp/tsg/bison_flex/translate && CARGO_TARGET_DIR=../../.g2tsg \
-       CARGO_INCREMENTAL=0 cargo build --release --offline) &&
+       CARGO_HOME=/Volumes/RamDisk/tree-sitter/tmp/tsg/.cargo CARGO_INCREMENTAL=0 \
+       cargo build --release --offline) &&
        cp tmp/tsg/.g2tsg/release/g2tsg tmp/tsg/bin/g2tsg && rm -rf tmp/tsg/.g2tsg
-    (cd tmp/tsg && cargo build -p tsg)     # target/debug/tsg
+    (cd tmp/tsg && CARGO_HOME=$PWD/.cargo cargo build -p tsg)   # target/debug/tsg
 EOF
 fi
 
@@ -205,6 +215,6 @@ printf '\n%s %s M, %s M free%s\n' \
     "$((after / 1024))" \
     "$([ -n "${before:-}" ] && [ -n "${after:-}" ] && echo " (was $((before / 1024)) M)")"
 if [ "$dry" = 0 ] && [ "$want_target" = 1 ]; then
-    echo "rebuild first: (cd tmp/tsg && cargo build -p tsg)   # gates need target/debug/tsg"
+    echo "rebuild first: (cd tmp/tsg && CARGO_HOME=$PWD/.cargo cargo build -p tsg)"
     echo "gates: ./selfhost.sh ./diff.sh ./e2e.sh ./roundtrip.sh --parsers"
 fi

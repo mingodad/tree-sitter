@@ -805,6 +805,11 @@ directory**:
 `build-cli.sh` cds up to the workspace, pins `CARGO_HOME=.cargo` and
 `CARGO_TARGET_DIR=.tsbuild` (both inside `tmp/tsg`, both gitignored), copies
 `bin/tree-sitter`, records `bin/VERSIONS`, and deletes the 420 MB build tree.
+Measured, so nobody has to guess: `cargo tree --offline -p tsg` writes nothing,
+but a **zero-dependency** `cargo build -p tsg` still creates `.global-cache`
+(64 KB) and the two lock files in `CARGO_HOME`, which is why even that build
+pins `CARGO_HOME`.  Copying crates is the only thing that is conditional.
+
 `.cargo/registry` is a **symlink** to `~/.cargo/registry`: the registry is read
 on every resolve and written only when a crate is genuinely fetched — the one
 write that is ordinary cargo behaviour for every project on the machine — while
