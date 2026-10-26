@@ -41,12 +41,12 @@ pub fn build_lex_table(
         LexTable::default()
     };
 
-    let debug = std::env::var_os("TS_DEBUG_TIMING").is_some();
+    let timing = log::log_enabled!(log::Level::Debug);
     let mut t0 = std::time::Instant::now();
     let time = |name: &str, t0: &mut std::time::Instant| {
-        if debug {
+        if timing {
             let now = std::time::Instant::now();
-            eprintln!(
+            debug!(
                 "  lex {:26} {:>8.2}s",
                 name,
                 now.duration_since(*t0).as_secs_f64()
@@ -248,7 +248,7 @@ impl<'a> LexTableBuilder<'a> {
             );
         }
 
-        let debug = std::env::var_os("TS_DEBUG_TIMING").is_some();
+        let timing = log::log_enabled!(log::Level::Debug);
         let t0 = std::time::Instant::now();
         let mut max_nfa_states = 0;
         while let Some(QueueEntry {
@@ -259,8 +259,8 @@ impl<'a> LexTableBuilder<'a> {
         {
             max_nfa_states = max_nfa_states.max(nfa_states.len());
             self.populate_state(state_id, nfa_states, eof_valid);
-            if debug && self.table.states.len() % 2000 == 0 {
-                eprintln!(
+            if timing && self.table.states.len() % 2000 == 0 {
+                debug!(
                     "    lex states {:6} queue {:6} max_nfa {:5} {:.1}s",
                     self.table.states.len(),
                     self.state_queue.len(),
@@ -269,8 +269,8 @@ impl<'a> LexTableBuilder<'a> {
                 );
             }
         }
-        if debug {
-            eprintln!(
+        if timing {
+            debug!(
                 "  lex state set: tokens {:4} -> states {:6} max_nfa {:5} {:.2}s",
                 tokens.len(),
                 self.table.states.len(),
